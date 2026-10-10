@@ -94,12 +94,71 @@ async def _resolve_available_regions(settings: ScannerSettings) -> tuple[str, ..
     return regions
 
 
-def _secondary_env(key: str) -> str:
-    return os.getenv(f"SEL2_{key}", "").strip()
+# Верхняя граница сканирования аккаунтов SEL{n}_ в .env. Защищает от бесконечного
+# цикла enumerate и задаёт «разумный потолок» на число воркеров (аккаунтов можно
+# задать сколько угодно до этого числа — SEL_, SEL2_, SEL3_, …, SEL64_).
+MAX_ACCOUNTS = 64
+_ACCOUNT_ENV_KEYS = ("USERNAME", "PASSWORD", "ACCOUNT_ID", "PROJECT_NAME", "PROJECT_ID")
 
 
-def _pick_secondary_value(config_value: str, env_key: str, fallback: str = "") -> str:
-    env_value = _secondary_env(env_key)
+def _account_env_prefix(index: int) -> str:
+    """SEL_ для первого аккаунта, SEL2_/SEL3_/… для последующих (единая конвенция с hunt.py)."""
+    return "SEL_" if index == 1 else f"SEL{index}_"
+
+
+def _account_label_env_key(index: int) -> str:
+    """Имя env-переменной с подписью воркера: SEL1_LABEL, SEL2_LABEL, SEL3_LABEL, …"""
+    return f"SEL{index}_LABEL"
+
+
+def _account_has_env(prefix: str) -> bool:
+    return any(os.getenv(f"{prefix}{key}", "").strip() for key in _ACCOUNT_ENV_KEYS)
+
+
+def _config_account_has_values(acc: object | None) -> bool:
+    if acc is None:
+        return False
+    return any(
+        (getattr(acc, field_name, "") or "").strip()
+        for field_name in ("username", "password", "account_id", "project_name", "project_id")
+    )
+
+
+@dataclass
+class AccountSpec:
+    """Один аккаунт для мульти-дашборда: порядковый номер, env-префикс и (опц.) запись config.json."""
+
+    index: int
+    prefix: str
+    config_account: object | None
+
+
+def _enumerate_accounts(config: ScannerConfig) -> list[AccountSpec]:
+    """Все заданные аккаунты по порядку.
+
+    Аккаунт 1 — primary (`SEL_*` / `config.selectel.api`), далее `SEL2_*`, `SEL3_*`, …
+    и/или `config.selectel.additional_accounts`. Аккаунт включается, если у него задан
+    хотя бы один из USERNAME/PASSWORD/ACCOUNT_ID/PROJECT_NAME/PROJECT_ID (в env или config).
+    Пропуски допускаются: можно задать только SEL_ и SEL4_ — вернутся оба.
+    """
+    extra = config.selectel.additional_accounts
+    specs: list[AccountSpec] = []
+
+    if _account_has_env("SEL_") or _config_account_has_values(config.selectel.api):
+        specs.append(AccountSpec(index=1, prefix="SEL_", config_account=config.selectel.api))
+
+    upper = max(MAX_ACCOUNTS, len(extra) + 1)
+    for index in range(2, upper + 1):
+        prefix = _account_env_prefix(index)
+        cfg_acc = extra[index - 2] if (index - 2) < len(extra) else None
+        if _account_has_env(prefix) or _config_account_has_values(cfg_acc):
+            specs.append(AccountSpec(index=index, prefix=prefix, config_account=cfg_acc))
+
+    return specs
+
+
+def _pick_account_value(prefix: str, config_value: str, key: str, fallback: str = "") -> str:
+    env_value = os.getenv(f"{prefix}{key}", "").strip()
     if env_value:
         return env_value
     config_value = (config_value or "").strip()
@@ -108,89 +167,34 @@ def _pick_secondary_value(config_value: str, env_key: str, fallback: str = "") -
     return fallback
 
 
-def _wants_primary(config: ScannerConfig) -> bool:
-    if any(
-        os.getenv(k, "").strip()
-        for k in (
-            "SEL_USERNAME",
-            "SEL_PASSWORD",
-            "SEL_ACCOUNT_ID",
-            "SEL_PROJECT_NAME",
-            "SEL_PROJECT_ID",
-        )
-    ):
-        return True
-    api = config.selectel.api
-    return bool(
-        (api.username or "").strip()
-        or (api.password or "").strip()
-        or (api.account_id or "").strip()
-        or (api.project_name or "").strip()
-        or (api.project_id or "").strip()
-    )
-
-
-def _wants_secondary(config: ScannerConfig) -> bool:
-    if any(
-        os.getenv(f"SEL2_{k}", "").strip()
-        for k in ("USERNAME", "PASSWORD", "ACCOUNT_ID", "PROJECT_NAME", "PROJECT_ID")
-    ):
-        return True
-    accs = config.selectel.additional_accounts
-    if not accs:
-        return False
-    a = accs[0]
-    return bool(
-        (a.username or "").strip()
-        or (a.password or "").strip()
-        or (a.account_id or "").strip()
-        or (a.project_name or "").strip()
-        or (a.project_id or "").strip()
-    )
-
-
-def _primary_credentials(settings: ScannerSettings) -> dict[str, str]:
+def _account_credentials(spec: AccountSpec) -> dict[str, str]:
+    cfg = spec.config_account
+    # Пароль НЕ .strip() — по краям могут быть значимые пробелы.
+    password = os.getenv(f"{spec.prefix}PASSWORD", "") or (getattr(cfg, "password", "") or "")
     return {
-        "username": (settings.username or "").strip(),
-        "password": (settings.password or "").strip(),
-        "account_id": (settings.account_id or "").strip(),
-        "project_name": (settings.project_name or "").strip(),
-        "project_id": (settings.project_id or "").strip(),
+        "username": _pick_account_value(spec.prefix, getattr(cfg, "username", ""), "USERNAME"),
+        "password": password,
+        "account_id": _pick_account_value(spec.prefix, getattr(cfg, "account_id", ""), "ACCOUNT_ID"),
+        # Проект у каждого аккаунта свой: не наследуем от другого аккаунта. Если не задан —
+        # bootstrap-этап резолвнёт его через VPC Resell API и запишет SEL{n}_PROJECT_ID.
+        "project_name": _pick_account_value(spec.prefix, getattr(cfg, "project_name", ""), "PROJECT_NAME"),
+        "project_id": _pick_account_value(spec.prefix, getattr(cfg, "project_id", ""), "PROJECT_ID"),
     }
 
 
-def _secondary_credentials(config_account: object | None, primary_settings: ScannerSettings) -> dict[str, str]:
-    return {
-        "username": _pick_secondary_value(getattr(config_account, "username", ""), "USERNAME"),
-        "password": (os.getenv("SEL2_PASSWORD", "").strip() or (getattr(config_account, "password", "") or "").strip()),
-        "account_id": _pick_secondary_value(getattr(config_account, "account_id", ""), "ACCOUNT_ID"),
-        "project_name": _pick_secondary_value(
-            getattr(config_account, "project_name", ""),
-            "PROJECT_NAME",
-            primary_settings.project_name,
-        ),
-        "project_id": _pick_secondary_value(
-            getattr(config_account, "project_id", ""),
-            "PROJECT_ID",
-            primary_settings.project_id,
-        ),
-    }
-
-
-def _validate_worker_credentials(
+def _validate_account_credentials(
     worker_title: str,
     creds: dict[str, str],
-    *,
-    env_hint_primary: bool,
+    prefix: str,
 ) -> str | None:
     """Возвращает текст ошибки для Recent Events или None, если всё ок."""
     missing: list[str] = []
     if not creds.get("username"):
-        missing.append("логин (SEL_USERNAME / config)" if env_hint_primary else "логин (SEL2_USERNAME / config)")
+        missing.append(f"логин ({prefix}USERNAME / config)")
     if not creds.get("password"):
-        missing.append("пароль (SEL_PASSWORD / config)" if env_hint_primary else "пароль (SEL2_PASSWORD / config)")
+        missing.append(f"пароль ({prefix}PASSWORD / config)")
     if not creds.get("account_id"):
-        missing.append("SEL_ACCOUNT_ID" if env_hint_primary else "SEL2_ACCOUNT_ID")
+        missing.append(f"{prefix}ACCOUNT_ID")
     if missing:
         return f"{worker_title} не запущен: не задано — {', '.join(missing)}"
     # Проект не обязателен: если не задан — попробуем автодискавери через VPC Resell API.
@@ -243,115 +247,82 @@ def _emit_log_flags(
     return emit_out, log_err, suppress_console, log_file_arg
 
 
-async def _prepare_primary_regions(
-    args: argparse.Namespace,
-    primary_settings: ScannerSettings,
-) -> tuple[str, ...]:
-    available_primary = await _resolve_available_regions(primary_settings)
-    sel1 = _regions_from_env_var("SEL1_SCANNER_REGIONS")
-
-    if args.regions:
-        primary_regions = primary_settings.regions
-    elif sel1 is not None:
-        primary_regions = tuple(r for r in sel1 if r in available_primary)
-        if not primary_regions:
-            primary_regions = available_primary
-    else:
-        primary_regions = available_primary
-
-    primary_settings.regions = primary_regions
-    primary_settings.state_section = "account-1"
-    return primary_regions
+def _account_region_env(index: int) -> tuple[str, ...] | None:
+    """Регионы воркера из env: SEL1_SCANNER_REGIONS / SEL_SCANNER_REGIONS для аккаунта 1,
+    SEL{n}_SCANNER_REGIONS для остальных. None — переменные не заданы."""
+    names = ["SEL1_SCANNER_REGIONS", "SEL_SCANNER_REGIONS"] if index == 1 else [f"SEL{index}_SCANNER_REGIONS"]
+    for name in names:
+        regions = _regions_from_env_var(name)
+        if regions is not None:
+            return regions
+    return None
 
 
-async def _finalize_secondary_settings(
-    args: argparse.Namespace,
-    primary_settings: ScannerSettings,
-    secondary_config: object | None,
-    *,
-    primary_regions: tuple[str, ...] | None,
-) -> ScannerSettings:
-    if primary_regions is None:
-        secondary_seed = _build_secondary_settings(
-            primary_settings,
-            regions=(),
-            config_account=secondary_config,
-        )
-    else:
-        secondary_seed = _build_secondary_settings(
-            primary_settings,
-            regions=primary_regions if args.regions else (),
-            config_account=secondary_config,
-        )
-    available_secondary = await _resolve_available_regions(secondary_seed)
-    sel2 = _regions_from_env_var("SEL2_SCANNER_REGIONS")
-
-    if args.regions:
-        secondary_regions = secondary_seed.regions
-    elif sel2 is not None:
-        secondary_regions = tuple(r for r in sel2 if r in available_secondary)
-        if not secondary_regions:
-            secondary_regions = available_secondary
-    else:
-        secondary_regions = secondary_seed.regions or available_secondary
-
-    return _build_secondary_settings(
-        primary_settings,
-        regions=secondary_regions,
-        config_account=secondary_config,
-    )
-
-
-def _build_secondary_settings(
-    primary_settings: ScannerSettings,
+def _build_account_settings(
+    base: ScannerSettings,
+    spec: AccountSpec,
     *,
     regions: tuple[str, ...],
-    config_account: object | None = None,
 ) -> ScannerSettings:
-    username = _pick_secondary_value(getattr(config_account, "username", ""), "USERNAME")
-    password = os.getenv("SEL2_PASSWORD", "") or getattr(config_account, "password", "")
-    account_id = _pick_secondary_value(getattr(config_account, "account_id", ""), "ACCOUNT_ID")
-    project_name = _pick_secondary_value(
-        getattr(config_account, "project_name", ""),
-        "PROJECT_NAME",
-        primary_settings.project_name,
-    )
-    project_id = _pick_secondary_value(
-        getattr(config_account, "project_id", ""),
-        "PROJECT_ID",
-        primary_settings.project_id,
-    )
+    """Строит ScannerSettings одного аккаунта: его креды + общие тайминги/пути из `base`.
 
-    if not username or not password or not account_id:
+    `base` — настройки, собранные `build_settings(args, ...)` (общие значения SEL_* таймингов,
+    whitelist/state пути). Каждому аккаунту даётся своя секция state (`account-{n}`).
+    """
+    creds = _account_credentials(spec)
+    if not creds["username"] or not creds["password"] or not creds["account_id"]:
         raise ValueError(
-            "Задайте второй аккаунт в .env (SEL2_*) или в config.json → selectel.additional_accounts[0]"
+            f"Аккаунт {spec.index}: задайте {spec.prefix}USERNAME / {spec.prefix}PASSWORD / "
+            f"{spec.prefix}ACCOUNT_ID в .env (или config.json)"
         )
     # project_name / project_id может отсутствовать — bootstrap-этап запросит через Resell API.
-
     return ScannerSettings(
-        username=username,
-        password=password,
-        account_id=account_id,
-        project_name=project_name,
-        project_id=project_id,
-        whitelist_path=primary_settings.whitelist_path,
-        state_path=primary_settings.state_path,
-        state_section="account-2",
+        username=creds["username"],
+        password=creds["password"],
+        account_id=creds["account_id"],
+        project_name=creds["project_name"],
+        project_id=creds["project_id"],
+        whitelist_path=base.whitelist_path,
+        state_path=base.state_path,
+        state_section=f"account-{spec.index}",
         regions=regions,
-        target_count=primary_settings.target_count,
-        min_batch_size=primary_settings.min_batch_size,
-        max_batch_size=primary_settings.max_batch_size,
-        delete_concurrency=primary_settings.delete_concurrency,
-        live_refresh_per_second=primary_settings.live_refresh_per_second,
-        allocation_poll_attempts=primary_settings.allocation_poll_attempts,
-        allocation_poll_delay=primary_settings.allocation_poll_delay,
-        cooldown_base=primary_settings.cooldown_base,
-        cooldown_max=primary_settings.cooldown_max,
-        cleanup_on_exit=primary_settings.cleanup_on_exit,
-        cleanup_existing_non_matches=primary_settings.cleanup_existing_non_matches,
-        reconcile_interval=primary_settings.reconcile_interval,
-        max_floating_ips_per_minute=primary_settings.max_floating_ips_per_minute,
+        target_count=base.target_count,
+        min_batch_size=base.min_batch_size,
+        max_batch_size=base.max_batch_size,
+        delete_concurrency=base.delete_concurrency,
+        live_refresh_per_second=base.live_refresh_per_second,
+        allocation_poll_attempts=base.allocation_poll_attempts,
+        allocation_poll_delay=base.allocation_poll_delay,
+        cooldown_base=base.cooldown_base,
+        cooldown_max=base.cooldown_max,
+        cleanup_on_exit=base.cleanup_on_exit,
+        cleanup_existing_non_matches=base.cleanup_existing_non_matches,
+        reconcile_interval=base.reconcile_interval,
+        max_floating_ips_per_minute=base.max_floating_ips_per_minute,
     )
+
+
+async def _prepare_account_regions(
+    args: argparse.Namespace,
+    spec: AccountSpec,
+    settings: ScannerSettings,
+) -> tuple[str, ...]:
+    """Определяет финальные регионы воркера и проставляет их в `settings` inplace.
+
+    Приоритет: --regions из CLI > SEL{n}_SCANNER_REGIONS из env > все доступные проекту.
+    """
+    available = await _resolve_available_regions(settings)
+    env_regions = _account_region_env(spec.index)
+
+    if args.regions:
+        chosen = tuple(r for r in settings.regions if r in available) or available
+    elif env_regions is not None:
+        chosen = tuple(r for r in env_regions if r in available) or available
+    else:
+        chosen = available
+
+    settings.regions = chosen
+    return chosen
 
 
 def _compact_label(label: str) -> str:
@@ -361,31 +332,27 @@ def _compact_label(label: str) -> str:
     return f"{primary[:13]}..."
 
 
-def _render_mode_banner(console: Console, *, wp: bool, ws: bool) -> None:
-    """Явно сообщает пользователю, в каком режиме будет работать программа.
+def _render_mode_banner(console: Console, specs: list[AccountSpec]) -> None:
+    """Явно сообщает пользователю, сколько аккаунтов будет работать и под какими префиксами.
 
     Отделено от dashboard-а, чтобы даже в non-interactive режиме было понятно,
-    что запускается один или два воркера.
+    один, два или больше воркеров запускается.
     """
-    if wp and ws:
+    prefixes = ", ".join(f"{spec.prefix}*" for spec in specs)
+    if len(specs) >= 2:
         text = (
-            "[bold]Режим:[/bold] [cyan]два аккаунта[/cyan] "
-            "(SEL_* и SEL2_*).\n"
-            "Интерфейс покажет обе колонки воркеров параллельно."
+            f"[bold]Режим:[/bold] [cyan]{len(specs)} аккаунта(-ов)[/cyan] "
+            f"({prefixes}).\n"
+            "Интерфейс покажет все колонки воркеров параллельно."
         )
         border = "cyan"
-    elif wp:
-        text = (
-            "[bold]Режим:[/bold] [green]один аккаунт[/green] (SEL_*).\n"
-            "Второй аккаунт не задан — запускается single-интерфейс.\n"
-            "[dim]Чтобы добавить второй, пропишите SEL2_USERNAME / SEL2_PASSWORD / "
-            "SEL2_ACCOUNT_ID в .env или запустите `--setup` снова.[/dim]"
-        )
-        border = "green"
     else:
+        next_prefix = _account_env_prefix(specs[0].index + 1) if specs else "SEL2_"
         text = (
-            "[bold]Режим:[/bold] [green]один аккаунт[/green] (только SEL2_*).\n"
-            "Первый аккаунт не задан — запускается single-интерфейс по SEL2_*."
+            f"[bold]Режим:[/bold] [green]один аккаунт[/green] ({prefixes}).\n"
+            "Другие аккаунты не заданы — запускается single-интерфейс.\n"
+            f"[dim]Чтобы добавить ещё один, пропишите {next_prefix}USERNAME / {next_prefix}PASSWORD / "
+            f"{next_prefix}ACCOUNT_ID в .env (можно хоть до SEL{MAX_ACCOUNTS}_).[/dim]"
         )
         border = "green"
 
@@ -612,13 +579,13 @@ def _print_help() -> int:
 
     console = dashboard_console()
     console.print()
-    console.print("Second account environment variables:", style="bold")
-    console.print("  SEL2_USERNAME")
-    console.print("  SEL2_PASSWORD")
-    console.print("  SEL2_ACCOUNT_ID")
-    console.print("  SEL2_PROJECT_NAME or SEL2_PROJECT_ID")
-    console.print("Or set variables in .env (see .env.example) or selectel.additional_accounts[0] in config.json")
-    console.print("Optional labels: SEL1_LABEL, SEL2_LABEL")
+    console.print("Account environment variables (unlimited accounts):", style="bold")
+    console.print("  Account 1: SEL_USERNAME / SEL_PASSWORD / SEL_ACCOUNT_ID [/ SEL_PROJECT_NAME|SEL_PROJECT_ID]")
+    console.print("  Account 2: SEL2_USERNAME / SEL2_PASSWORD / SEL2_ACCOUNT_ID [/ SEL2_PROJECT_NAME|SEL2_PROJECT_ID]")
+    console.print(f"  Account N: SELN_USERNAME / SELN_PASSWORD / SELN_ACCOUNT_ID  (N = 2..{MAX_ACCOUNTS})")
+    console.print("Or set variables in .env (see .env.example) or selectel.additional_accounts in config.json")
+    console.print("Optional labels: SEL1_LABEL, SEL2_LABEL, SEL3_LABEL, …")
+    console.print("Optional per-account regions: SEL1_SCANNER_REGIONS, SEL2_SCANNER_REGIONS, …")
     console.print("  --rich-logs     — логи событий в stderr вместе с полноэкранным Rich")
     console.print("  --log-file PATH — тот же лог в файл внутри проекта, напр. temp/scanner.log")
     return exit_code
@@ -709,161 +676,85 @@ async def run_async(argv: list[str] | None = None) -> int:
     render_whitelist_banner(console, DEFAULT_WHITELIST_PATH)
 
     config = load_scanner_config(args.config_path)
-    config_accounts = config.selectel.additional_accounts
-    secondary_config = config_accounts[0] if config_accounts else None
 
-    wp = _wants_primary(config)
-    ws = _wants_secondary(config)
-    if not wp and not ws:
+    specs = _enumerate_accounts(config)
+    if not specs:
         raise ValueError(
-            "Не задан ни первый аккаунт (SEL_* / config → selectel.api), "
-            "ни второй (SEL2_* / additional_accounts[0])."
+            "Не задан ни один аккаунт (SEL_*, SEL2_*, SEL3_*, … / config → selectel.api / additional_accounts)."
         )
 
-    _render_mode_banner(console, wp=wp, ws=ws)
+    _render_mode_banner(console, specs)
 
-    # require_project=False: project может быть автодискавери-резолвнутым ниже
-    if wp and not ws:
-        primary_settings = build_settings(args, require_project=False)
-    else:
-        primary_settings = build_settings(
-            args, allow_incomplete_primary=True, require_project=False
-        )
-
-    primary_err: str | None = None
-    if wp:
-        primary_err = _validate_worker_credentials(
-            "Аккаунт 1",
-            _primary_credentials(primary_settings),
-            env_hint_primary=True,
-        )
-
-    secondary_err: str | None = None
-    if ws:
-        secondary_err = _validate_worker_credentials(
-            "Аккаунт 2",
-            _secondary_credentials(secondary_config, primary_settings),
-            env_hint_primary=False,
-        )
+    # Общие тайминги/пути (и креды аккаунта 1) собираем один раз; остальным аккаунтам
+    # эти значения отдаются как база. require_project=False — проект может резолвиться ниже.
+    base_settings = build_settings(args, allow_incomplete_primary=True, require_project=False)
 
     interactive_ui = bool(args.rich) or (console.is_terminal and sys.stdout.isatty())
 
-    # Один заданный аккаунт — один процесс сканера с обычным Rich-дашбордом.
-    if wp and not ws:
-        if primary_err:
-            raise ValueError(primary_err)
+    # Проверяем креды всех аккаунтов заранее: у кого не хватает — воркер не стартует,
+    # причина попадёт в Recent Events (в мульти-режиме) или остановит запуск (в single).
+    account_errs: dict[int, str | None] = {
+        spec.index: _validate_account_credentials(
+            f"Аккаунт {spec.index}", _account_credentials(spec), spec.prefix
+        )
+        for spec in specs
+    }
+
+    # Ровно один заданный аккаунт — обычный single-дашборд.
+    if len(specs) == 1:
+        spec = specs[0]
+        if account_errs[spec.index]:
+            raise ValueError(account_errs[spec.index])
+        settings = _build_account_settings(base_settings, spec, regions=())
         await _bootstrap_account(
-            primary_settings,
+            settings,
             console=console,
             args=args,
-            account_label="Аккаунт 1",
-            env_prefix="SEL_",
+            account_label=f"Аккаунт {spec.index}",
+            env_prefix=spec.prefix,
             interactive_ui=interactive_ui,
         )
-        await _prepare_primary_regions(args, primary_settings)
+        await _prepare_account_regions(args, spec, settings)
         return await _run_single_scanner_from_dual(
-            primary_settings,
+            settings,
             console=console,
             args=args,
             interactive_ui=interactive_ui,
         )
 
-    if ws and not wp:
-        if secondary_err:
-            raise ValueError(secondary_err)
-        secondary_seed = _build_secondary_settings(
-            primary_settings, regions=(), config_account=secondary_config
-        )
-        await _bootstrap_account(
-            secondary_seed,
-            console=console,
-            args=args,
-            account_label="Аккаунт 2",
-            env_prefix="SEL2_",
-            interactive_ui=interactive_ui,
-        )
-        secondary_settings = await _finalize_secondary_settings(
-            args,
-            primary_settings,
-            secondary_config,
-            primary_regions=None,
-        )
-        return await _run_single_scanner_from_dual(
-            secondary_settings,
-            console=console,
-            args=args,
-            interactive_ui=interactive_ui,
-        )
-
-    # Оба аккаунта задействованы — dual layout; при ошибке в .env воркер не стартует, причина в Recent Events.
-    assert wp and ws
-    primary_regions: tuple[str, ...] | None = None
-    if not primary_err:
-        await _bootstrap_account(
-            primary_settings,
-            console=console,
-            args=args,
-            account_label="Аккаунт 1",
-            env_prefix="SEL_",
-            interactive_ui=interactive_ui,
-        )
-        primary_regions = await _prepare_primary_regions(args, primary_settings)
-
-    secondary_settings: ScannerSettings | None = None
-    if not secondary_err:
-        secondary_seed = _build_secondary_settings(
-            primary_settings, regions=(), config_account=secondary_config
-        )
-        await _bootstrap_account(
-            secondary_seed,
-            console=console,
-            args=args,
-            account_label="Аккаунт 2",
-            env_prefix="SEL2_",
-            interactive_ui=interactive_ui,
-        )
-        secondary_settings = await _finalize_secondary_settings(
-            args,
-            primary_settings,
-            secondary_config,
-            primary_regions=primary_regions,
-        )
-
+    # Два и более аккаунта — мульти-дашборд с колонкой на каждый воркер.
     emit_out, log_err, suppress_console, log_file_arg = _emit_log_flags(args, console, interactive_ui)
 
-    label1 = _slot_label("SEL1_LABEL", "Аккаунт 1", primary_settings, err=primary_err)
-    label2 = _slot_label("SEL2_LABEL", "Аккаунт 2", secondary_settings, err=secondary_err)
-
-    slot1_app: SelectelScannerApp | None = None
-    if not primary_err:
-        slot1_app = SelectelScannerApp(
-            primary_settings,
-            console=console,
-            interactive=False,
-            emit_console_output=emit_out,
-            emit_summary=not interactive_ui,
-            log_to_stderr=log_err,
-            log_file=log_file_arg,
-            suppress_console_log=suppress_console,
-        )
-
-    slot2_app: SelectelScannerApp | None = None
-    if not secondary_err and secondary_settings is not None:
-        slot2_app = SelectelScannerApp(
-            secondary_settings,
-            console=console,
-            interactive=False,
-            emit_console_output=emit_out,
-            emit_summary=not interactive_ui,
-            log_to_stderr=log_err,
-            log_file=log_file_arg,
-            suppress_console_log=suppress_console,
-        )
-
-    slots = [
-        WorkerSlot(label=label1, app=slot1_app, events=_slot_events(slot1_app, primary_err)),
-        WorkerSlot(label=label2, app=slot2_app, events=_slot_events(slot2_app, secondary_err)),
-    ]
+    slots: list[WorkerSlot] = []
+    for spec in specs:
+        err = account_errs[spec.index]
+        label_key = _account_label_env_key(spec.index)
+        fallback_label = f"Аккаунт {spec.index}"
+        app: SelectelScannerApp | None = None
+        label = _slot_label(label_key, fallback_label, None, err=err)
+        if not err:
+            settings = _build_account_settings(base_settings, spec, regions=())
+            await _bootstrap_account(
+                settings,
+                console=console,
+                args=args,
+                account_label=fallback_label,
+                env_prefix=spec.prefix,
+                interactive_ui=interactive_ui,
+            )
+            await _prepare_account_regions(args, spec, settings)
+            label = _slot_label(label_key, fallback_label, settings, err=None)
+            app = SelectelScannerApp(
+                settings,
+                console=console,
+                interactive=False,
+                emit_console_output=emit_out,
+                emit_summary=not interactive_ui,
+                log_to_stderr=log_err,
+                log_file=log_file_arg,
+                suppress_console_log=suppress_console,
+            )
+        slots.append(WorkerSlot(label=label, app=app, events=_slot_events(app, err)))
 
     active_apps = [s.app for s in slots if s.app is not None]
     refresh_per_second = max(

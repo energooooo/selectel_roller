@@ -99,52 +99,43 @@ def _parse_csv_env(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
 
 
-def _apply_env_to_api(api: SelectelApiConfig, *, secondary: bool) -> None:
-    """Подставляет секреты и идентификаторы из окружения (в т.ч. из .env)."""
-    if secondary:
-        mapping = (
-            ("username", "SEL2_USERNAME"),
-            ("password", "SEL2_PASSWORD"),
-            ("account_id", "SEL2_ACCOUNT_ID"),
-            ("project_name", "SEL2_PROJECT_NAME"),
-            ("project_id", "SEL2_PROJECT_ID"),
-        )
-    else:
-        mapping = (
-            ("username", "SEL_USERNAME"),
-            ("password", "SEL_PASSWORD"),
-            ("account_id", "SEL_ACCOUNT_ID"),
-            ("project_name", "SEL_PROJECT_NAME"),
-            ("project_id", "SEL_PROJECT_ID"),
-        )
+def _account_env_prefix(index: int) -> str:
+    """Префикс переменных аккаунта в .env: SEL_ для первого, SEL2_/SEL3_/… для остальных.
+
+    Единая конвенция со scanner.hunt и scanner.dual: аккаунт 1 — SEL_*, аккаунт N — SEL{N}_*.
+    """
+    return "SEL_" if index == 1 else f"SEL{index}_"
+
+
+def _apply_env_to_api(api: SelectelApiConfig, prefix: str) -> None:
+    """Подставляет секреты и идентификаторы из окружения (в т.ч. из .env) по префиксу аккаунта."""
+    mapping = (
+        ("username", f"{prefix}USERNAME"),
+        ("password", f"{prefix}PASSWORD"),
+        ("account_id", f"{prefix}ACCOUNT_ID"),
+        ("project_name", f"{prefix}PROJECT_NAME"),
+        ("project_id", f"{prefix}PROJECT_ID"),
+    )
     for field_name, env_key in mapping:
         raw = os.getenv(env_key, "").strip()
         if raw:
             setattr(api, field_name, raw)
-    if secondary:
-        ru2 = os.getenv("SEL2_SERVER_ID_RU2", "").strip()
-        ru3 = os.getenv("SEL2_SERVER_ID_RU3", "").strip()
-        if ru2:
-            api.server_id_ru2 = ru2
-        if ru3:
-            api.server_id_ru3 = ru3
-        ids = _parse_csv_env(os.getenv("SEL2_SERVER_IDS", ""))
-        if ids:
-            api.server_ids = ids
-    else:
-        ru2 = os.getenv("SEL_SERVER_ID_RU2", "").strip()
-        ru3 = os.getenv("SEL_SERVER_ID_RU3", "").strip()
-        if ru2:
-            api.server_id_ru2 = ru2
-        if ru3:
-            api.server_id_ru3 = ru3
+    ru2 = os.getenv(f"{prefix}SERVER_ID_RU2", "").strip()
+    ru3 = os.getenv(f"{prefix}SERVER_ID_RU3", "").strip()
+    if ru2:
+        api.server_id_ru2 = ru2
+    if ru3:
+        api.server_id_ru3 = ru3
+    ids = _parse_csv_env(os.getenv(f"{prefix}SERVER_IDS", ""))
+    if ids:
+        api.server_ids = ids
 
 
 def _overlay_selectel_env(svc: SelectelServiceConfig) -> None:
-    _apply_env_to_api(svc.api, secondary=False)
+    # Аккаунт 1 — SEL_*; дополнительные аккаунты из config.json — SEL2_*, SEL3_*, … по порядку.
+    _apply_env_to_api(svc.api, _account_env_prefix(1))
     for index, account in enumerate(svc.additional_accounts):
-        if index == 0:
-            _apply_env_to_api(account, secondary=True)
+        _apply_env_to_api(account, _account_env_prefix(index + 2))
 
 
 def load_scanner_config(config_path: str | Path | None = None) -> ScannerConfig:
