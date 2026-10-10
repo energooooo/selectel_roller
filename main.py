@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Точка входа: два аккаунта Selectel + Rich dashboard. Перед импортом пакетов поднимается .venv."""
+"""Точка входа: 1..N аккаунтов Selectel + Rich dashboard. Перед импортом пакетов поднимается .venv."""
 
 import os
 import subprocess
@@ -59,7 +59,10 @@ def _ensure_venv() -> None:
 
 _ensure_venv()
 
-from scanner.dual import main
+if len(sys.argv) > 1 and sys.argv[1] in ("discover", "hunt", "tg-test"):
+    from scanner.hunt import main
+else:
+    from scanner.dual import main
 
 
 if __name__ == "__main__":

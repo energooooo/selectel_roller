@@ -32,6 +32,8 @@ class SelectelScannerClient:
         self.project_name = project_name.strip()
         self.project_id = project_id.strip()
         self.request_timeout = max(float(request_timeout), 5.0)
+        # Сколько раз пробовать запрос при обрыве соединения (см. _send_with_retries).
+        self.transport_attempts = 4
         self.regions = tuple(region.strip() for region in regions if region.strip())
 
         self._token: str = ""
@@ -312,26 +314,41 @@ class SelectelScannerClient:
     ) -> httpx.Response:
         extra_headers = kwargs.pop("headers", {})
         await self.ensure_authenticated()
-        response = await self._client.request(
-            method,
-            url,
-            headers={**self._auth_headers(), **extra_headers},
-            **kwargs,
-        )
+        response = await self._send_with_retries(method, url, extra_headers, **kwargs)
 
         if response.status_code == 401 and retry_on_unauthorized:
             self._token = ""
             self._token_expires = None
             await self.ensure_authenticated()
-            response = await self._client.request(
-                method,
-                url,
-                headers={**self._auth_headers(), **extra_headers},
-                **kwargs,
-            )
+            response = await self._send_with_retries(method, url, extra_headers, **kwargs)
 
         response.raise_for_status()
         return response
+
+    # Обрыв до отправки запроса (connect/TLS) безопасно повторить для любого метода;
+    # обрыв после отправки — только для идемпотентных, иначе POST мог уже создать IP.
+    _PRE_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+    _POST_SEND_ERRORS = (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError)
+    _IDEMPOTENT = {"GET", "HEAD", "DELETE", "PUT"}
+
+    async def _send_with_retries(
+        self, method: str, url: str, extra_headers: dict[str, str], **kwargs: Any
+    ) -> httpx.Response:
+        attempts = max(1, self.transport_attempts)
+        for attempt in range(attempts):
+            try:
+                return await self._client.request(
+                    method,
+                    url,
+                    headers={**self._auth_headers(), **extra_headers},
+                    **kwargs,
+                )
+            except self._PRE_SEND_ERRORS + self._POST_SEND_ERRORS as exc:
+                retryable = isinstance(exc, self._PRE_SEND_ERRORS) or method.upper() in self._IDEMPOTENT
+                if not retryable or attempt == attempts - 1:
+                    raise
+                await asyncio.sleep(2 ** attempt)
+        raise AssertionError("unreachable")
 
     async def list_floating_ips(
         self,
@@ -454,6 +471,61 @@ class SelectelScannerClient:
             raise RuntimeError(f"Selectel region {region} returned an external network without ID")
         self._external_network_ids[region] = network_id
         return network_id
+
+    async def list_floatingip_pools(self, region: str) -> list[dict[str, Any]]:
+        """Neutron extension floatingip-pools: подсети внешних сетей, из которых выдаются floating IP."""
+        response = await self._request("GET", f"{self._neutron_url(region)}/v2.0/floatingip_pools")
+        return [item for item in response.json().get("floatingip_pools", []) if isinstance(item, dict)]
+
+    async def list_external_subnets(self, region: str) -> list[dict[str, Any]]:
+        """Фоллбэк для floatingip_pools: подсети всех внешних сетей региона."""
+        response = await self._request(
+            "GET",
+            f"{self._neutron_url(region)}/v2.0/networks",
+            params={"router:external": True},
+        )
+        subnets: list[dict[str, Any]] = []
+        for network in response.json().get("networks", []):
+            network_id = str(network.get("id", "")).strip()
+            if not network_id:
+                continue
+            sub_response = await self._request(
+                "GET",
+                f"{self._neutron_url(region)}/v2.0/subnets",
+                params={"network_id": network_id},
+            )
+            for subnet in sub_response.json().get("subnets", []):
+                if isinstance(subnet, dict):
+                    subnets.append(
+                        {
+                            "subnet_id": subnet.get("id"),
+                            "subnet_name": subnet.get("name"),
+                            "cidr": subnet.get("cidr"),
+                            "network_id": network_id,
+                        }
+                    )
+        return subnets
+
+    async def create_floating_ip_in_subnet(
+        self, region: str, network_id: str, subnet_id: str, floating_ip_address: str | None = None
+    ) -> FloatingIPRecord:
+        """Запрашивает floating IP из конкретной подсети внешней сети (Neutron `subnet_id`),
+        при `floating_ip_address` — конкретный адрес из неё."""
+        body = {"floating_network_id": network_id, "subnet_id": subnet_id}
+        if floating_ip_address:
+            body["floating_ip_address"] = floating_ip_address
+        response = await self._request(
+            "POST",
+            f"{self._neutron_url(region)}/v2.0/floatingips",
+            json={"floatingip": body},
+        )
+        payload = response.json().get("floatingip", {})
+        if not payload:
+            raise RuntimeError(f"Selectel create floating IP returned an empty payload for {region}")
+        record = FloatingIPRecord.from_payload({**payload, "region": payload.get("region") or region})
+        if record.id:
+            self._resource_regions[record.id] = region
+        return record
 
     async def delete_floating_ip(self, floating_ip_id: str) -> bool:
         """Neutron DELETE floatingips/{id}. Политику «не трогать whitelist» обеспечивает SelectelScannerApp._delete_records."""
