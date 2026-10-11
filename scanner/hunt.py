@@ -63,6 +63,37 @@ def _env_prefix(account: str) -> str:
     return "SEL_" if account == "1" else f"SEL{account}_"
 
 
+def _account_proxy(prefix: str, account: str, account_id: str) -> tuple[str | None, str]:
+    """Прокси аккаунта и его «липкая» сессия (для лога, без кредов).
+
+    Selectel связывает аккаунты, которые ходят с одного IP с одинаковым поведением, и банит
+    их пачкой. Поэтому у каждого аккаунта должен быть свой выходной IP:
+    - SEL{n}_PROXY (n ≥ 2) задан явно — берём его как есть (свой прокси у аккаунта);
+    - иначе берём общий SEL_PROXY и дописываем к паролю «_session-<id>»: мобильный прокси
+      держит для одной сессии один IP, разные сессии — разные IP. Без сессии он меняет IP на
+      каждое соединение, и аккаунты перемешиваются в одном пуле адресов.
+    id стабилен (по номеру аккаунта Selectel), так что после рестарта аккаунт вернётся на свой IP.
+    Отключить: SEL_PROXY_SESSIONS=0.
+    """
+    own = os.getenv(f"{prefix}PROXY", "").strip() if account != "1" else ""
+    if own:
+        return own, "свой прокси"
+    base = os.getenv("SEL_PROXY", "").strip()
+    if not base:
+        return None, ""
+    if os.getenv("SEL_PROXY_SESSIONS", "1").strip() in ("0", "false", "no"):
+        return base, "общий, без сессии"
+    parsed = urlparse(base)
+    if parsed.password is None or "_session-" in parsed.password:
+        return base, "общий"
+    # Провайдер принимает id сессии не короче 8 символов.
+    session = f"sel{account_id or account}".ljust(8, "0")
+    netloc = f"{parsed.username}:{parsed.password}_session-{session}@{parsed.hostname}"
+    if parsed.port:
+        netloc += f":{parsed.port}"
+    return parsed._replace(netloc=netloc).geturl(), f"сессия {session}"
+
+
 def _state_section(account: str) -> str:
     """Секция найденных IP в state-файле: у каждого аккаунта своя (две охоты пишут в один файл)."""
     return STATE_SECTION if account == "1" else f"{STATE_SECTION}-{account}"
@@ -589,6 +620,7 @@ async def run_async(argv: list[str]) -> int:
         auto_create=args.auto_create_project,
     )
 
+    proxy, proxy_note = _account_proxy(prefix, args.account, settings.account_id)
     client = SelectelScannerClient(
         username=settings.username,
         password=settings.password,
@@ -599,15 +631,17 @@ async def run_async(argv: list[str]) -> int:
         request_timeout=15.0,
         # Живой эндпоинт коннектится за ~45 мс; заблокированный/мёртвый не должен висеть 15 с.
         connect_timeout=_float_env("SEL_HUNT_CONNECT_TIMEOUT", 8.0),
-        # Прокси (SEL_PROXY в .env, напр. socks5://user:pass@host:port) — обход бана IP хоста.
-        proxy=os.getenv("SEL_PROXY", "").strip() or None,
+        # Прокси — обход бана IP хоста; у каждого аккаунта свой выходной IP (см. _account_proxy).
+        proxy=proxy,
     )
     if client.proxy:
         # Не печатаем креды: только host:port из URL.
         _pr = urlparse(client.proxy)
-        console.print(f"Proxy: включён ({_pr.scheme}://{_pr.hostname}:{_pr.port})")
+        console.print(f"Proxy: включён ({_pr.scheme}://{_pr.hostname}:{_pr.port}, {proxy_note})")
     # Охота сама ставит недоступный регион на паузу — долгие повторы внутри клиента не нужны.
-    client.transport_attempts = 2
+    # Через мобильный прокси до ~30 % новых туннелей отклоняются (ProxyError) ещё до отправки
+    # запроса — Selectel их не видит, поэтому лишние повторы темп к Selectel не повышают.
+    client.transport_attempts = 4 if client.proxy else 2
     try:
         await client.ensure_authenticated()
         regions = tuple(sorted(client.available_regions()))
