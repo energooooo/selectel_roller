@@ -66,6 +66,10 @@ class SelectelScannerClient:
         )
         if self.proxy:
             client_kwargs["proxy"] = self.proxy
+            # Запросы идут раз в ~10 с, а keepalive httpx по умолчанию 5 с: без этого каждый
+            # запрос заново открывает SOCKS-туннель + TLS, и любой флап прокси на установке
+            # туннеля бьёт по каждому запросу. Держим туннель к эндпоинту региона живым.
+            client_kwargs["limits"] = httpx.Limits(keepalive_expiry=120.0)
         self._client = httpx.AsyncClient(**client_kwargs)
 
     def _token_valid(self) -> bool:
@@ -360,7 +364,9 @@ class SelectelScannerClient:
 
     # Обрыв до отправки запроса (connect/TLS) безопасно повторить для любого метода;
     # обрыв после отправки — только для идемпотентных, иначе POST мог уже создать IP.
-    _PRE_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout)
+    # ProxyError — отказ прокси на установке туннеля (SOCKS-хендшейк/HTTP CONNECT), т.е.
+    # запрос до Selectel не дошёл: повтор безопасен и для POST.
+    _PRE_SEND_ERRORS = (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout, httpx.ProxyError)
     _POST_SEND_ERRORS = (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError, httpx.WriteError)
     _IDEMPOTENT = {"GET", "HEAD", "DELETE", "PUT"}
 

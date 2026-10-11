@@ -391,11 +391,15 @@ async def try_target(
         if isinstance(exc, SelectelScannerClient._POST_SEND_ERRORS):
             recovered = await _recover_created(client, target, matches)
         if recovered is None and isinstance(exc, SelectelScannerClient._PRE_SEND_ERRORS):
-            raise RegionUnreachable(type(exc).__name__) from exc
+            detail = str(exc).strip()
+            raise RegionUnreachable(type(exc).__name__ + (f": {detail}" if detail else "")) from exc
         if recovered is None:
             target.errors += 1
             stats.counts["error"] += 1
-            console.print(f"[{_now()}] [red]{target.label()}: сеть: {type(exc).__name__}[/red]")
+            # Текст исключения важен: у ProxyError в нём код ответа SOCKS (ruleset/unreachable/refused).
+            detail = str(exc).strip()
+            console.print(f"[{_now()}] [red]{target.label()}: сеть: {type(exc).__name__}"
+                          + (f" ({detail})" if detail else "") + "[/red]")
             return None
         record = recovered
         console.print(f"[{_now()}] [yellow]{target.label()}: ответ потерян ({type(exc).__name__}), "
