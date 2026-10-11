@@ -26,12 +26,17 @@ class SelectelScannerClient:
         request_timeout: float = 30.0,
         regions: tuple[str, ...] = (),
         connect_timeout: float | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.username = username.strip()
         self.password = password
         self.account_id = account_id.strip()
         self.project_name = project_name.strip()
         self.project_id = project_id.strip()
+        # Прокси (напр. socks5://user:pass@host:port) — весь трафик к Selectel идёт через него.
+        # Нужно, когда прямой IP хоста забанен Selectel'ом на эндпоинтах региона: мобильный/
+        # другой egress-IP снова видит ru-1/ru-3/ru-9. Для socks5:// требуется пакет socksio.
+        self.proxy = (proxy or "").strip() or None
         self.request_timeout = max(float(request_timeout), 5.0)
         # Отдельный таймаут на установку соединения. Живой эндпоинт Selectel принимает
         # коннект за ~45 мс, поэтому короткий connect-таймаут не мешает рабочим регионам,
@@ -53,12 +58,15 @@ class SelectelScannerClient:
         self._external_network_ids: dict[str, str] = {}
         self._resource_regions: dict[str, str] = {}
 
-        self._client = httpx.AsyncClient(
+        client_kwargs: dict[str, Any] = dict(
             timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout),
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             verify=False,
             follow_redirects=True,
         )
+        if self.proxy:
+            client_kwargs["proxy"] = self.proxy
+        self._client = httpx.AsyncClient(**client_kwargs)
 
     def _token_valid(self) -> bool:
         if not self._token or not self._token_expires:

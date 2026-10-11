@@ -29,6 +29,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
@@ -594,7 +595,13 @@ async def run_async(argv: list[str]) -> int:
         request_timeout=15.0,
         # Живой эндпоинт коннектится за ~45 мс; заблокированный/мёртвый не должен висеть 15 с.
         connect_timeout=_float_env("SEL_HUNT_CONNECT_TIMEOUT", 8.0),
+        # Прокси (SEL_PROXY в .env, напр. socks5://user:pass@host:port) — обход бана IP хоста.
+        proxy=os.getenv("SEL_PROXY", "").strip() or None,
     )
+    if client.proxy:
+        # Не печатаем креды: только host:port из URL.
+        _pr = urlparse(client.proxy)
+        console.print(f"Proxy: включён ({_pr.scheme}://{_pr.hostname}:{_pr.port})")
     # Охота сама ставит недоступный регион на паузу — долгие повторы внутри клиента не нужны.
     client.transport_attempts = 2
     try:
