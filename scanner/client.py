@@ -82,6 +82,23 @@ class SelectelScannerClient:
                 return
             await self.authenticate()
 
+    # Авторизация делается редко, но критична: один флап сети/прокси не должен ронять
+    # весь процесс (в hunt это = выход с кодом 2 и ожидание 5 минут). Поэтому POST на
+    # identity переживает transient-ошибки транспорта (вкл. ProxyError флапающего прокси).
+    _AUTH_ATTEMPTS = 6
+
+    async def _post_identity(self, payload: dict[str, Any]) -> httpx.Response:
+        last_exc: Exception | None = None
+        for attempt in range(self._AUTH_ATTEMPTS):
+            try:
+                return await self._client.post(IDENTITY_URL, json=payload)
+            except httpx.TransportError as exc:
+                last_exc = exc
+                if attempt < self._AUTH_ATTEMPTS - 1:
+                    await asyncio.sleep(min(2 ** attempt, 8))
+        assert last_exc is not None
+        raise last_exc
+
     async def authenticate(self) -> None:
         last_error: Exception | None = None
         payloads = self._project_scope_payloads()
@@ -90,7 +107,7 @@ class SelectelScannerClient:
 
         for payload in payloads:
             try:
-                response = await self._client.post(IDENTITY_URL, json=payload)
+                response = await self._post_identity(payload)
             except Exception as exc:  # pragma: no cover - network passthrough
                 last_error = exc
                 continue
