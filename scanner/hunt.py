@@ -122,6 +122,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="main.py",
@@ -434,10 +441,19 @@ async def hunt(
     attempts = 0
     last_summary: tuple = ()
     last_print = 0.0
-    # Регион, чей API перестал принимать соединения, ставится на паузу с растущим интервалом:
-    # долбить его дальше — только продлевать блокировку.
+    # Регион, чей API стабильно не принимает соединения, ставится на короткую паузу.
+    # ВАЖНО: одиночный ConnectTimeout — это, как правило, transient-блип сети/эндпоинта,
+    # а НЕ «регион лёг». Раньше первый же таймаут ставил регион на 2→30 мин, и регион
+    # застревал на потолке 30 мин (просыпался, ловил один таймаут, снова 30 мин) — т.е.
+    # делал ~1 попытку в полчаса. Теперь регион паузим только после нескольких подряд
+    # таймаутов, пауза короткая и быстро сбрасывается при первом же успехе.
     region_pause: dict[str, float] = {}
     region_backoff: dict[str, float] = {}
+    region_fails: dict[str, int] = {}  # подряд идущих ConnectTimeout по региону (сбрасывается успехом)
+    # Порог подряд идущих таймаутов перед паузой; старт и потолок паузы (с). Настраиваются через .env.
+    fail_threshold = max(1, _int_env("SEL_HUNT_REGION_FAIL_THRESHOLD", 3))
+    pause_base = max(1.0, _float_env("SEL_HUNT_REGION_PAUSE_BASE", 20.0))
+    pause_max = max(pause_base, _float_env("SEL_HUNT_REGION_PAUSE_MAX", 180.0))
     while True:
         active = [t for t in targets if not t.disabled]
         if not active:
@@ -457,6 +473,8 @@ async def hunt(
             attempts += 1
             try:
                 match = await try_target(client, target, matcher, store, matches, console, stats)
+                # Любой успешный контакт с регионом полностью сбрасывает счётчик таймаутов и backoff.
+                region_fails.pop(target.region, None)
                 if target.region in region_backoff:
                     region_backoff.pop(target.region)
                     console.print(f"[{_now()}] [green]{target.region}: API снова отвечает, охота продолжается.[/green]")
@@ -482,17 +500,24 @@ async def hunt(
                 continue
             except RegionUnreachable as exc:
                 stats.counts["error"] += 1
-                backoff = min(max(120.0, region_backoff.get(target.region, 0.0) * 2), 1800.0)
+                fails = region_fails.get(target.region, 0) + 1
+                region_fails[target.region] = fails
+                # Одиночные/редкие таймауты — transient-блип: не паузим регион, просто пробуем
+                # его снова в следующем круге. Пауза — только после fail_threshold подряд.
+                if fails < fail_threshold:
+                    continue
+                backoff = min(max(pause_base, region_backoff.get(target.region, 0.0) * 2), pause_max)
                 first = target.region not in region_backoff
                 region_backoff[target.region] = backoff
                 region_pause[target.region] = time.monotonic() + backoff
-                console.print(f"[{_now()}] [red]{target.region}: API не принимает соединения ({exc}). "
-                              f"Пауза региона {int(backoff // 60)} мин.[/red]")
+                unit = f"{int(backoff)} с" if backoff < 60 else f"{backoff / 60:.1f} мин"
+                console.print(f"[{_now()}] [red]{target.region}: API не принимает соединения ({exc}, "
+                              f"{fails} подряд). Пауза региона {unit}.[/red]")
                 if notifier and first:
                     await notifier.send(
                         f"⚠️ API {html.escape(target.region)} не принимает соединения ({html.escape(str(exc))}). "
-                        f"Возможно, Selectel временно заблокировал IP за частые запросы. Регион на паузе, "
-                        f"остальные продолжают."
+                        f"Похоже, Selectel заблокировал IP этого хоста на эндпоинте региона за частые запросы. "
+                        f"Регион на короткой паузе с авто-переподключением, остальные продолжают."
                     )
                 continue
             except AddressNotAllowed as exc:
@@ -567,6 +592,8 @@ async def run_async(argv: list[str]) -> int:
         project_id=settings.project_id,
         regions=settings.regions,
         request_timeout=15.0,
+        # Живой эндпоинт коннектится за ~45 мс; заблокированный/мёртвый не должен висеть 15 с.
+        connect_timeout=_float_env("SEL_HUNT_CONNECT_TIMEOUT", 8.0),
     )
     # Охота сама ставит недоступный регион на паузу — долгие повторы внутри клиента не нужны.
     client.transport_attempts = 2

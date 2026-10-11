@@ -25,6 +25,7 @@ class SelectelScannerClient:
         project_id: str = "",
         request_timeout: float = 30.0,
         regions: tuple[str, ...] = (),
+        connect_timeout: float | None = None,
     ) -> None:
         self.username = username.strip()
         self.password = password
@@ -32,6 +33,13 @@ class SelectelScannerClient:
         self.project_name = project_name.strip()
         self.project_id = project_id.strip()
         self.request_timeout = max(float(request_timeout), 5.0)
+        # Отдельный таймаут на установку соединения. Живой эндпоинт Selectel принимает
+        # коннект за ~45 мс, поэтому короткий connect-таймаут не мешает рабочим регионам,
+        # но мёртвый/заблокированный эндпоинт отваливается за секунды, а не за request_timeout.
+        if connect_timeout is None:
+            self.connect_timeout = self.request_timeout
+        else:
+            self.connect_timeout = max(float(connect_timeout), 1.0)
         # Сколько раз пробовать запрос при обрыве соединения (см. _send_with_retries).
         self.transport_attempts = 4
         self.regions = tuple(region.strip() for region in regions if region.strip())
@@ -46,7 +54,7 @@ class SelectelScannerClient:
         self._resource_regions: dict[str, str] = {}
 
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(self.request_timeout),
+            timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout),
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             verify=False,
             follow_redirects=True,
