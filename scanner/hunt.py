@@ -29,6 +29,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -466,6 +467,7 @@ async def hunt(
     args: argparse.Namespace,
     console: Console,
     notifier: TelegramNotifier | None = None,
+    rotate_proxy: Callable[[], Awaitable[str]] | None = None,
 ) -> int:
     section = _state_section(getattr(args, "account", "1"))
     store = MatchStore(STATE_PATH, section=section)
@@ -489,6 +491,11 @@ async def hunt(
     region_pause: dict[str, float] = {}
     region_backoff: dict[str, float] = {}
     region_fails: dict[str, int] = {}  # подряд идущих ConnectTimeout по региону (сбрасывается успехом)
+    # Транспортные сбои подряд по ВСЕМ регионам (сбрасывается любым успехом). Бан эндпоинта бьёт
+    # по одному региону, а умершая липкая сессия прокси — по всем сразу: тогда меняем сессию.
+    transport_streak = 0
+    streak_regions: set[str] = set()
+    rotate_after = max(2, _int_env("SEL_PROXY_ROTATE_AFTER", 4))
     # Порог подряд идущих таймаутов перед паузой; старт и потолок паузы (с). Настраиваются через .env.
     fail_threshold = max(1, _int_env("SEL_HUNT_REGION_FAIL_THRESHOLD", 3))
     pause_base = max(1.0, _float_env("SEL_HUNT_REGION_PAUSE_BASE", 20.0))
@@ -514,6 +521,8 @@ async def hunt(
                 match = await try_target(client, target, matcher, store, matches, console, stats)
                 # Любой успешный контакт с регионом полностью сбрасывает счётчик таймаутов и backoff.
                 region_fails.pop(target.region, None)
+                transport_streak = 0
+                streak_regions.clear()
                 if target.region in region_backoff:
                     region_backoff.pop(target.region)
                     console.print(f"[{_now()}] [green]{target.region}: API снова отвечает, охота продолжается.[/green]")
@@ -539,6 +548,21 @@ async def hunt(
                 continue
             except RegionUnreachable as exc:
                 stats.counts["error"] += 1
+                transport_streak += 1
+                streak_regions.add(target.region)
+                if rotate_proxy and transport_streak >= rotate_after and len(streak_regions) >= 2:
+                    note = await rotate_proxy()
+                    console.print(f"[{_now()}] [yellow]Прокси-сессия не работает ни в одном регионе "
+                                  f"({exc}). Сменил на {note}, паузы регионов сброшены.[/yellow]")
+                    if notifier:
+                        await notifier.send(f"🔁 Прокси-сессия перестала работать ({html.escape(str(exc)[:120])}). "
+                                            f"Сменил на {html.escape(note)}, охота продолжается.")
+                    transport_streak = 0
+                    streak_regions.clear()
+                    region_fails.clear()
+                    region_backoff.clear()
+                    region_pause.clear()
+                    continue
                 fails = region_fails.get(target.region, 0) + 1
                 region_fails[target.region] = fails
                 # Одиночные/редкие таймауты — transient-блип: не паузим регион, просто пробуем
@@ -553,10 +577,12 @@ async def hunt(
                 console.print(f"[{_now()}] [red]{target.region}: API не принимает соединения ({exc}, "
                               f"{fails} подряд). Пауза региона {unit}.[/red]")
                 if notifier and first:
+                    reason = ("Вероятно, сбой прокси-сессии; если откажут все регионы — сессия сменится сама."
+                              if client.proxy else
+                              "Похоже, Selectel заблокировал IP этого хоста на эндпоинте региона за частые запросы.")
                     await notifier.send(
                         f"⚠️ API {html.escape(target.region)} не принимает соединения ({html.escape(str(exc))}). "
-                        f"Похоже, Selectel заблокировал IP этого хоста на эндпоинте региона за частые запросы. "
-                        f"Регион на короткой паузе с авто-переподключением, остальные продолжают."
+                        f"{reason} Регион на короткой паузе с авто-переподключением, остальные продолжают."
                     )
                 continue
             except AddressNotAllowed as exc:
@@ -665,6 +691,17 @@ async def run_async(argv: list[str]) -> int:
             console.print(f"[yellow]Прокси-сессия не работает ({type(exc.__cause__).__name__}: "
                           f"{str(exc.__cause__)[:80]}) — пробую следующую.[/yellow]")
             await client.close()
+
+    rotate_proxy = None
+    if proxy_note.startswith("сессия"):
+        session_gen = generation
+
+        async def rotate_proxy() -> str:
+            nonlocal session_gen
+            session_gen += 1
+            new_proxy, note = _account_proxy(prefix, args.account, settings.account_id, session_gen)
+            await client.set_proxy(new_proxy)
+            return note
     try:
         await client.ensure_authenticated()
         regions = tuple(sorted(client.available_regions()))
@@ -699,13 +736,13 @@ async def run_async(argv: list[str]) -> int:
         console.print("Telegram: " + ("уведомления включены" if notifier else
                                       "выключен (TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID в .env, проверка: run.bat tg-test)"))
         if notifier is None:
-            return await hunt(client, targets, matcher, args, console)
+            return await hunt(client, targets, matcher, args, console, rotate_proxy=rotate_proxy)
         active = [t for t in targets if not t.disabled]
         await notifier.send(
             f"🔎 Охота запущена: {len(active)} целей, регионы {html.escape(', '.join(sorted({t.region for t in active})))}"
         )
         try:
-            return await hunt(client, targets, matcher, args, console, notifier)
+            return await hunt(client, targets, matcher, args, console, notifier, rotate_proxy)
         except asyncio.CancelledError:
             await notifier.send("⏹ Охота остановлена вручную.")
             raise

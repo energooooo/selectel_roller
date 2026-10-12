@@ -58,6 +58,9 @@ class SelectelScannerClient:
         self._external_network_ids: dict[str, str] = {}
         self._resource_regions: dict[str, str] = {}
 
+        self._client = self._build_http_client()
+
+    def _build_http_client(self) -> httpx.AsyncClient:
         client_kwargs: dict[str, Any] = dict(
             timeout=httpx.Timeout(self.request_timeout, connect=self.connect_timeout),
             headers={"Accept": "application/json", "Content-Type": "application/json"},
@@ -70,7 +73,15 @@ class SelectelScannerClient:
             # запрос заново открывает SOCKS-туннель + TLS, и любой флап прокси на установке
             # туннеля бьёт по каждому запросу. Держим туннель к эндпоинту региона живым.
             client_kwargs["limits"] = httpx.Limits(keepalive_expiry=120.0)
-        self._client = httpx.AsyncClient(**client_kwargs)
+        return httpx.AsyncClient(**client_kwargs)
+
+    async def set_proxy(self, proxy: str | None) -> None:
+        """Пересоздаёт HTTP-клиент с другим прокси (смена липкой сессии); токен сохраняется."""
+        old = self._client
+        self.proxy = (proxy or "").strip() or None
+        self._client = self._build_http_client()
+        with suppress(Exception):
+            await old.aclose()
 
     def _token_valid(self) -> bool:
         if not self._token or not self._token_expires:
