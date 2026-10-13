@@ -9,6 +9,12 @@ import httpx
 
 from .models import FloatingIPRecord
 
+try:  # socksio ставится вместе с httpx[socks]; без него SOCKS-прокси не работает вовсе
+    from socksio.exceptions import ProtocolError as _SocksProtocolError
+except ImportError:  # pragma: no cover
+    class _SocksProtocolError(Exception):
+        pass
+
 
 IDENTITY_URL = "https://cloud.api.selcloud.ru/identity/v3/auth/tokens"
 
@@ -83,6 +89,18 @@ class SelectelScannerClient:
         with suppress(Exception):
             await old.aclose()
 
+    async def _raw(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        """Запрос через httpx; мусорный ответ SOCKS-прокси приводим к httpx.ProxyError.
+
+        httpcore не оборачивает socksio.ProtocolError («Malformed reply», когда модем прокси
+        отвечает на SOCKS-рукопожатие мусором) — без этого исключение пролетало мимо ретраев
+        и ротации сессии и роняло охоту целиком. Это отказ до отправки запроса, как ProxyError.
+        """
+        try:
+            return await self._client.request(method, url, **kwargs)
+        except _SocksProtocolError as exc:
+            raise httpx.ProxyError(f"SOCKS: {exc}") from exc
+
     def _token_valid(self) -> bool:
         if not self._token or not self._token_expires:
             return False
@@ -106,7 +124,7 @@ class SelectelScannerClient:
         last_exc: Exception | None = None
         for attempt in range(self._AUTH_ATTEMPTS):
             try:
-                return await self._client.post(IDENTITY_URL, json=payload)
+                return await self._raw("POST", IDENTITY_URL, json=payload)
             except httpx.TransportError as exc:
                 last_exc = exc
                 if attempt < self._AUTH_ATTEMPTS - 1:
@@ -387,7 +405,7 @@ class SelectelScannerClient:
         attempts = max(1, self.transport_attempts)
         for attempt in range(attempts):
             try:
-                return await self._client.request(
+                return await self._raw(
                     method,
                     url,
                     headers={**self._auth_headers(), **extra_headers},

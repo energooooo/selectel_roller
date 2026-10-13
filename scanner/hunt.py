@@ -779,3 +779,10 @@ def main(argv: list[str] | None = None) -> int:
             detail = f" (HTTP {cause.response.status_code}: {cause.response.text[:200]})"
         print(f"Ошибка: {exc}{detail}", file=sys.stderr)
         return 2
+    except Exception as exc:  # noqa: BLE001
+        # Непредвиденное падение НЕ должно давать код 1: run-hunt.sh считает его «все цели
+        # отключены» и больше не перезапускает охоту. Код 4 → перезапуск через 5 минут.
+        import traceback
+        traceback.print_exc()
+        print(f"Непредвиденная ошибка: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 4
