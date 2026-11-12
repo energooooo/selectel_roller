@@ -53,6 +53,8 @@ export default function MetricsPage() {
     const t = data?.totals
     const errorsTotal = t ? t.errors + t.timeouts + t.proxy_errors : 0
     // Больше 8 ключей на одном графике не различить — остальные сворачиваются в «Прочие».
+    // «Прочие» — среднее на один аккаунт, а не сумма: иначе 16 обычных аккаунтов рисуются
+    // одной линией в 16 раз выше остальных и выглядят как самый быстрый ключ.
     const keyLines = (() => {
         if (!data) return []
         const sorted = [...data.by_key_series].sort((a, b) => b.values.reduce((s, v) => s + v, 0) - a.values.reduce((s, v) => s + v, 0))
@@ -61,9 +63,9 @@ export default function MetricsPage() {
         const lines = head.map((k, i) => ({name: k.name, values: k.values.map((v) => +(v * 60 / data.step_s).toFixed(2)), color: SERIES[i]}))
         if (tail.length) {
             lines.push({
-                name: `Прочие (${tail.length})`,
-                values: tail[0].values.map((_, i) => +(tail.reduce((s, k) => s + k.values[i], 0) * 60 / data.step_s).toFixed(2)),
-                color: SERIES[7],
+                name: `Прочие ${tail.length}, в среднем на аккаунт`,
+                values: tail[0].values.map((_, i) => +(tail.reduce((s, k) => s + k.values[i], 0) / tail.length * 60 / data.step_s).toFixed(2)),
+                color: "var(--subtle)",
             })
         }
         return lines
