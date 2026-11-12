@@ -78,7 +78,12 @@ function CodeCells({code, expired}: { code: string; expired: boolean }) {
 const STEPS = [
     {
         title: "Установите расширение",
-        text: <>В <span className="font-mono text-foreground/85">chrome://extensions</span> включите «Режим разработчика» и загрузите папку <span className="font-mono text-foreground/85">chrome-extension</span>.</>,
+        text: <>
+            <a href="/api/extension/download" download
+               className="inline-flex items-center gap-1.5 font-medium text-foreground underline decoration-amber/60 underline-offset-4 transition-colors duration-150 hover:text-amber">
+                Скачайте ZIP
+            </a>{" "}и распакуйте. В <span className="font-mono text-foreground/85">chrome://extensions</span> включите «Режим разработчика» → «Загрузить распакованное» → папка <span className="font-mono text-foreground/85">toffee-roller-extension</span>.
+        </>,
     },
     {
         title: "Откройте его",

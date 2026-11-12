@@ -10,6 +10,9 @@ COPY app ./app
 COPY seed ./seed
 COPY alembic.ini .
 COPY migrations ./migrations
+# Расширение браузера из соседней папки репозитория (docker-compose: additional_contexts) —
+# панель отдаёт его ZIP-архивом, всегда той же версии, что и задеплоенный код.
+COPY --from=extension . ./extension
 
 RUN useradd --system --uid 10001 roller \
     && mkdir -p /app/data /data \

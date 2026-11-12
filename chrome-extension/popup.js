@@ -70,7 +70,19 @@ function render() {
         li.append(state, who, btn);
         list.appendChild(li);
     }
+    updateFade();
 }
+
+// Затухание у края списка — только там, куда ещё можно прокрутить.
+function updateFade() {
+    const list = $("#list");
+    const fade = [];
+    if (list.scrollTop > 2) fade.push("top");
+    if (list.scrollTop + list.clientHeight < list.scrollHeight - 2) fade.push("bottom");
+    list.dataset.fade = fade.join(" ");
+}
+
+$("#list").addEventListener("scroll", updateFade, {passive: true});
 
 $("#search").addEventListener("input", render);
 $("#open-connect").addEventListener("click", () => {
@@ -94,9 +106,13 @@ $("#open-selectel").addEventListener("click", () => openTab(SELECTEL_LOGIN));
         $("#base").title = base;
         $("#search-wrap").hidden = accounts.length <= 5;
         chip("ok", accounts.length ? `${data.onboarded} из ${accounts.length}` : "Подключено");
+        const waiting = accounts.length - (data.onboarded || 0);
+        $("#list-count").textContent = !accounts.length ? "" : waiting
+            ? `ждут входа: ${waiting}` : `все ${accounts.length} подключены`;
         $("#chip").title = "Подключено аккаунтов к панели";
         render();
         show("connected");
+        requestAnimationFrame(updateFade);  // размеры списка известны только после показа
         return;
     }
     chip("warn", "Не подключено");

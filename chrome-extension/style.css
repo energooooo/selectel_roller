@@ -807,15 +807,66 @@ label, .label {
     font-size: 14px;
 }
 
+.list-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: var(--muted-fg);
+}
+
+.list-head b {
+    font-weight: 500;
+    color: var(--fg);
+}
+
+/* Колонка сетки не растягивается под длинную почту (minmax(0, 1fr)) — иначе строка
+   вылезала вправо, появлялась горизонтальная прокрутка и прятала кнопку «Войти». */
 .list {
     display: grid;
+    grid-template-columns: minmax(0, 1fr);
     gap: 4px;
-    max-height: 264px;
+    max-height: 272px;
     margin: 0 -4px;
     padding: 0 4px;
+    overflow-x: hidden;
     overflow-y: auto;
+    overscroll-behavior: contain;
     list-style: none;
     scrollbar-width: thin;
+    scrollbar-color: var(--border-strong) transparent;
+}
+
+.list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.list::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.list::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: var(--border-strong);
+}
+
+.list::-webkit-scrollbar-thumb:hover {
+    background: var(--subtle);
+}
+
+/* Мягкое затухание у края, пока есть что прокручивать. */
+.list[data-fade~="bottom"] {
+    mask-image: linear-gradient(to bottom, #000 calc(100% - 28px), transparent);
+}
+
+.list[data-fade~="top"] {
+    mask-image: linear-gradient(to top, #000 calc(100% - 28px), transparent);
+}
+
+.list[data-fade~="top"][data-fade~="bottom"] {
+    mask-image: linear-gradient(to bottom, transparent, #000 28px, #000 calc(100% - 28px), transparent);
 }
 
 .row {
@@ -866,11 +917,11 @@ label, .label {
 }
 
 .row .btn {
+    flex-shrink: 0;
     height: 34px;
     padding: 0 12px;
     font-size: 13.5px;
 }
-
 .pop-actions {
     display: grid;
     grid-template-columns: 1fr 1fr;

@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app import bus, extension
+from app import bus, extension, extension_zip
 from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.core.crypto import decrypt, encrypt
@@ -156,6 +156,28 @@ async def revoke_token(token_id: int, current: Current = Depends(current_admin),
     await db.commit()
     await audit(current, "extension.revoke", row.label or str(token_id))
     return {"ok": True}
+
+
+@router.get("/download")
+async def download_extension(_: Current = Depends(current_admin)) -> Response:
+    """ZIP расширения той версии, что задеплоена вместе с панелью. Только для вошедших."""
+    try:
+        data, version = extension_zip.build()
+    except LookupError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Расширение не найдено на сервере") from exc
+    return Response(data, media_type="application/zip", headers={
+        "Content-Disposition": f'attachment; filename="toffee-roller-extension-v{version}.zip"',
+        "Cache-Control": "no-store",
+    })
+
+
+@router.get("/version")
+async def extension_version(_: Current = Depends(current_admin)) -> dict:
+    try:
+        _, version = extension_zip.build()
+    except LookupError:
+        return {"version": None}
+    return {"version": version}
 
 
 # ── Контур расширения (bearer) ───────────────────────────────────────────────
