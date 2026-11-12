@@ -31,6 +31,8 @@ const INVALIDATE: Record<string, string[]> = {
     caught_update: [],
     caught_check: [],
     settings: ["/settings"],
+    money: ["/finance", "/sales"],
+    vds: ["/caught", "/vds", "/finance"],
 }
 
 /**

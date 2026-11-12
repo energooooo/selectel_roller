@@ -61,6 +61,7 @@ class SelectelClient:
         self._neutron_urls: dict[str, str] = {}
         self._nova_urls: dict[str, str] = {}
         self._cinder_urls: dict[str, str] = {}
+        self._glance_urls: dict[str, str] = {}
         self._external_network_ids: dict[str, str] = {}
         self._resource_regions: dict[str, str] = {}
 
@@ -227,10 +228,11 @@ class SelectelClient:
         self._neutron_urls = {}
         self._nova_urls = {}
         self._cinder_urls = {}
+        self._glance_urls = {}
         services = payload.get("token", {}).get("catalog", [])
         for service in services:
             stype = str(service.get("type", "")).strip().lower()
-            if stype not in ("network", "compute", "volumev3", "block-storage"):
+            if stype not in ("network", "compute", "volumev3", "block-storage", "image"):
                 continue
             for endpoint in service.get("endpoints", []):
                 region = str(endpoint.get("region_id") or endpoint.get("region") or "").strip()
@@ -247,6 +249,8 @@ class SelectelClient:
                     self._neutron_urls[region] = url
                 elif stype == "compute":
                     self._nova_urls[region] = url
+                elif stype == "image":
+                    self._glance_urls[region] = url
                 else:
                     self._cinder_urls[region] = url
 
@@ -303,6 +307,29 @@ class SelectelClient:
                     }
                 )
         return servers
+
+    def endpoint(self, service: str, region: str) -> str:
+        """Публичный URL сервиса (network / compute / image / volume) в регионе."""
+        table = {"network": self._neutron_urls, "compute": self._nova_urls, "image": self._glance_urls,
+                 "volume": self._cinder_urls}[service]
+        url = table.get(region, "").rstrip("/")
+        if not url:
+            raise RuntimeError(f"В регионе {region} нет сервиса {service} — проект не видит его в каталоге Selectel")
+        return url
+
+    async def call(self, method: str, url: str, **kwargs: Any) -> dict[str, Any]:
+        """Запрос к любому сервису облака; JSON-ответ или {}."""
+        response = await self._request(method, url, **kwargs)
+        if not response.content:
+            return {}
+        try:
+            data = response.json()
+        except ValueError:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    async def external_network_id(self, region: str) -> str:
+        return await self._get_external_network_id(region)
 
     def volume_regions(self) -> tuple[str, ...]:
         return tuple(self._cinder_urls.keys())

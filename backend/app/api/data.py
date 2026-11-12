@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app import bus, metrics, settings_store
 from app.auth.deps import Current, audit, current_admin
 from app.checks import bsboard
-from app.db.models import CaughtIP, Event, MetricPoint, Proxy, SelectelKey, Subnet, utcnow
+from app.db.models import CaughtIP, Event, MetricPoint, Proxy, Sale, SelectelKey, Subnet, Vds, utcnow
 from app.db.session import get_db
 from app.engine.manager import manager
 from app.notify import telegram
@@ -33,7 +33,8 @@ def caught_view(c: CaughtIP, key_name: str | None) -> dict[str, Any]:
             "account_id": c.account_id, "pool_cidr": c.pool_cidr, "floating_ip_id": c.floating_ip_id,
             "caught_at": c.caught_at, "attempts_spent": c.attempts_spent, "protected": c.protected,
             "on_account": c.on_account, "released_at": c.released_at, "check_status": c.check_status,
-            "check_payload": c.check_payload, "checked_at": c.checked_at, "note": c.note, "source": c.source}
+            "check_payload": c.check_payload, "checked_at": c.checked_at, "note": c.note, "source": c.source,
+            "client": c.client or "", "tags": c.tags or [], "expires_at": c.expires_at}
 
 
 async def _caught_query(db: AsyncSession, key_id: int | None, region: str | None, on_account: bool | None,
@@ -50,7 +51,19 @@ async def _caught_query(db: AsyncSession, key_id: int | None, region: str | None
     if days:
         stmt = stmt.where(CaughtIP.caught_at >= utcnow() - timedelta(days=days))
     names = {k.id: k.name for k in (await db.execute(select(SelectelKey))).scalars()}
-    return [caught_view(c, names.get(c.key_id)) for c in (await db.execute(stmt.limit(2000))).scalars()]
+    income: dict[int, float] = defaultdict(float)
+    for cid, amount in (await db.execute(select(Sale.caught_id, Sale.amount).where(Sale.caught_id.is_not(None)))).all():
+        income[cid] += amount
+    servers = {v.caught_id: v for v in (await db.execute(select(Vds).where(Vds.status != "deleted"))).scalars()}
+    out = []
+    for c in (await db.execute(stmt.limit(2000))).scalars():
+        view = caught_view(c, names.get(c.key_id))
+        view["income"] = round(income.get(c.id, 0.0), 2)
+        v = servers.get(c.id)
+        view["vds"] = {"id": v.id, "status": v.status, "step": v.step, "flavor": v.flavor, "zone": v.zone,
+                       "error": v.error, "month_cost": v.month_cost, "has_password": bool(v.password_enc)} if v else None
+        out.append(view)
+    return out
 
 
 @router.get("/caught")
@@ -79,6 +92,9 @@ async def export_caught(_: Current = Depends(current_admin), db: AsyncSession = 
 class CaughtPatch(BaseModel):
     protected: bool | None = None
     note: str | None = Field(default=None, max_length=200)
+    client: str | None = Field(default=None, max_length=120)
+    tags: list[str] | None = Field(default=None, max_length=12)
+    expires_at: datetime | None = None
 
 
 @router.patch("/caught/{caught_id}")
@@ -87,11 +103,20 @@ async def update_caught(caught_id: int, body: CaughtPatch, current: Current = De
     caught = await db.get(CaughtIP, caught_id)
     if caught is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой записи")
-    for field, value in body.model_dump(exclude_none=True).items():
+    changes = body.model_dump(exclude_unset=True)
+    for field, value in changes.items():
+        if field == "protected" and value is None:
+            continue
+        if field == "tags":
+            value = sorted({t.strip()[:24] for t in value or [] if t.strip()})
+        elif isinstance(value, str):
+            value = value.strip()
+        if field == "expires_at" and value != caught.expires_at:
+            caught.expiry_notified_at = None  # новый срок — новое напоминание
         setattr(caught, field, value)
     await db.commit()
-    await audit(current, "caught.update", caught.ip, body.model_dump(exclude_none=True))
-    bus.publish("caught_update", {"id": caught.id, **body.model_dump(exclude_none=True)})
+    await audit(current, "caught.update", caught.ip, {k: str(v) for k, v in changes.items()})
+    bus.publish("caught_update", {"id": caught.id})
     return {"ok": True}
 
 

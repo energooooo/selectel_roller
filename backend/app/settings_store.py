@@ -26,6 +26,7 @@ DEFAULTS: dict[str, Any] = {
     "ip_goal": 1,  # сколько IP поймать на ключ, потом ключ останавливается
     "request_timeout": 15.0,
     "connect_timeout": 8.0,
+    "start_stagger": 20.0,  # интервал между запусками ключей, с (0 = все сразу)
     "max_consecutive_errors": 30,  # выключать ключ после N ошибок подряд
     "region_fail_threshold": 3,  # таймаутов подряд до паузы региона
     "region_pause_base": 20.0,
@@ -34,6 +35,19 @@ DEFAULTS: dict[str, Any] = {
     "proxy_check_interval_min": 30,  # фоновая проверка прокси
     "regions": ["ru-1", "ru-2", "ru-3", "ru-9"],
     "exact_only": True,  # только подсети, целиком лежащие в белом списке (без удалений)
+    # Регулятор темпа (app.engine.governor)
+    "pace_governor": True,
+    "pace_max": 4.0,  # во сколько раз максимум можно растянуть паузы
+    "pace_relax_min": 30,  # минут без сигналов — и темп ускоряется на ступень
+    # Рейтинг подсетей (app.engine.heat)
+    "hot_priority": True,  # горячие — первыми, холодные — не каждый круг
+    "cold_share": 0.35,  # в какой доле кругов обходить холодные подсети
+    # Деньги
+    "balance_check_min": 60,  # как часто спрашивать баланс аккаунтов
+    "balance_warn_days": 3,  # предупреждать, когда денег осталось меньше чем на N дней
+    "ip_expiry_warn_days": 3,  # напоминать о сроке IP за N дней
+    "vds_disk_gb": 5,
+    "vds_image": "Ubuntu 24.04 LTS 64-bit",
     # Telegram
     "tg_bot_token_enc": None,
     "tg_chat_id": "",
@@ -43,6 +57,7 @@ DEFAULTS: dict[str, Any] = {
     "notify_logins": True,
     "notify_rotations": False,
     "notify_daily": True,
+    "notify_money": True,  # мало денег на аккаунте, срок IP подходит
     # Проверка пойманных IP
     "bsboard_url": "",
     "bsboard_key_enc": None,

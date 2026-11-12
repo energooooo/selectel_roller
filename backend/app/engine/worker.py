@@ -29,6 +29,8 @@ from app import bus, metrics, settings_store
 from app.core.crypto import decrypt
 from app.db.models import CaughtIP, Proxy, RegionPool, SelectelKey, Subnet, utcnow
 from app.db.session import session_scope
+from app.engine import heat as heat_mod
+from app.engine.governor import GOOD, PaceGovernor
 from app.engine.proxy import with_session
 from app.engine.resell import SelectelResellClient
 from app.engine.selectel import SelectelClient
@@ -72,6 +74,9 @@ class Target:
     subnet_id: int  # наша запись в subnets
     subnet_cidr: str
     kind: str  # exact — вся подсеть Selectel белая; partial — белая только часть
+    heat: float = 1.0  # рейтинг подсети (app.engine.heat)
+    tier: str = "new"
+    weight: float = 1.0  # доля кругов, в которых цель обходится
     attempts: int = 0
     busy: int = 0
     errors: int = 0
@@ -98,6 +103,9 @@ class Runtime:
     proxy: str = ""
     next_action_at: float | None = None
     last_error: str = ""
+    pace: float = 1.0
+    pace_reason: str = ""
+    skipped_cold: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         now = time.time()
@@ -115,6 +123,9 @@ class Runtime:
             "proxy": self.proxy,
             "next_action_in": max(0, int(self.next_action_at - now)) if self.next_action_at else None,
             "last_error": self.last_error,
+            "pace": self.pace,
+            "pace_reason": self.pace_reason,
+            "skipped_cold": self.skipped_cold,
         }
 
 
@@ -184,6 +195,8 @@ class KeyWorker:
         self._proxy_selection_mode = "none"
         self._session_gen = 0
         self.consecutive_errors = 0
+        self.governor = PaceGovernor()
+        self._current: Target | None = None
 
     # ── публикация состояния ───────────────────────────────────────────────
 
@@ -215,6 +228,10 @@ class KeyWorker:
         try:
             await self._run()
         except StopHunt as stop:
+            if stop.status == "banned":
+                await self._sync_pace()
+                if self.manager:
+                    self.manager.neighbour_banned(self.key_id)
             await self._set_status(stop.status, stop.reason, enabled=False if stop.disable else None)
             level = "success" if stop.status == "done" else "error"
             await self.log(stop.reason, level=level, kind="stop")
@@ -237,6 +254,8 @@ class KeyWorker:
             self.key_name = key.name
             self.account_id = key.account_id
             self._session_gen = key.proxy_session_gen or 0
+            self.governor = PaceGovernor(key.pace or 1.0, key.pace_reason or "")
+            self.runtime.pace, self.runtime.pace_reason = self.governor.pace, self.governor.reason
             return key
 
     def _proxy_url(self) -> str | None:
@@ -262,6 +281,11 @@ class KeyWorker:
     async def _run(self) -> None:
         key = await self._load_key()
         self._proxy_selection_mode = key.proxy_mode
+        # Не все ключи разом: пачка входов с одной панели — это рейт-лимит и риск бана аккаунтов.
+        wait = self.manager.reserve_start_slot()
+        if wait >= 1:
+            await self._set_status("starting", f"В очереди на запуск, ~{int(wait)} с")
+            await self._sleep(wait, "starting")
         await self._set_status("starting", "Вход в Selectel…")
 
         proxy = await self.manager.proxy_for_key(self.key_id)
@@ -298,7 +322,10 @@ class KeyWorker:
         лечится следующей сессией — другим выходным IP."""
         tries = 5 if self._proxy_mode == "password_suffix" or self._proxy_selection_mode == "auto" else 1
         last: BaseException | None = None
-        for _ in range(tries):
+        rechecks = 2  # 401 бывает разовым (всплеск входов, сбой identity) — перепроверяем перед выключением ключа
+        attempt = 0
+        while attempt < tries:
+            attempt += 1
             self.client = await self._make_client(key)
             try:
                 await self.client.ensure_authenticated()
@@ -308,6 +335,13 @@ class KeyWorker:
                 cause = exc.__cause__
                 await self.client.close()
                 self.client = None
+                if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 401 and rechecks > 0:
+                    rechecks -= 1
+                    attempt -= 1
+                    pause = random.uniform(45, 90)
+                    await self.log(f"Selectel ответил 401 на вход, перепроверка через {int(pause)} с", "warn")
+                    await self._sleep(pause, "starting")
+                    continue
                 if isinstance(cause, httpx.HTTPStatusError) and cause.response.status_code == 401:
                     raise StopHunt("auth_failed", "Selectel не принял данные для входа. Проверьте имя пользователя, пароль "
                                                   "и доступ пользователя к проекту.", disable=True) from exc
@@ -373,6 +407,13 @@ class KeyWorker:
                                       cidr=p["cidr"]))
                 else:
                     row.network_id, row.cidr, row.updated_at = p["network_id"], p["cidr"], utcnow()
+            # Подсети, которых Selectel больше не отдаёт (или мусор из кэша), — вон, иначе на них
+            # строятся цели и каждый проход ловит 400 «not a valid UUID».
+            if clean:
+                fresh = {p["subnet_id"] for p in clean}
+                for os_id, row in existing.items():
+                    if os_id not in fresh:
+                        await db.delete(row)
         return clean
 
     async def discover(self) -> None:
@@ -423,9 +464,56 @@ class KeyWorker:
                         pool_cidr=pool.cidr, subnet_id=subnet.id, subnet_cidr=subnet.cidr, kind=kind))
         targets.sort(key=lambda t: (t.kind != "exact", t.region, t.pool_cidr))
         self.targets = targets
+        await self.refresh_heat()
         self.runtime.targets_total = len(targets)
         self.runtime.targets_active = sum(1 for t in targets if not t.disabled)
         self._publish()
+
+    async def refresh_heat(self) -> None:
+        """Рейтинг подсетей из БД — раз в круг, чтобы горячие поднимались сами по мере поимок."""
+        if not self.targets:
+            return
+        async with session_scope() as db:
+            scores = await heat_mod.subnet_scores(db)
+        for t in self.targets:
+            h = scores.get(t.subnet_id)
+            if h:
+                t.heat, t.tier, t.weight = h.heat, h.tier, h.weight
+
+    def round_plan(self, active: list[Target], rand: Any = random.random) -> list[Target]:
+        """Порядок обхода на круг: горячие первыми; холодные — только в доле кругов."""
+        if not settings_store.get("hot_priority"):
+            self.runtime.skipped_cold = 0
+            return active
+        ordered = sorted(active, key=lambda t: -t.heat)  # sorted стабилен: внутри равных — прежний порядок
+        plan = [t for t in ordered if t.weight >= 1.0 or rand() < t.weight]
+        self.runtime.skipped_cold = len(ordered) - len(plan)
+        return plan or ordered[:1]
+
+    async def _sync_pace(self) -> None:
+        """Изменения регулятора темпа — в БД, журнал и на сайт."""
+        self.runtime.pace, self.runtime.pace_reason = self.governor.pace, self.governor.reason
+        for line in self.governor.take_changes():
+            try:
+                await self.log(line, "warn" if "замедл" in line or "бан" in line else "info", kind="pace",
+                               pace=self.governor.pace)
+            except Exception:  # noqa: BLE001
+                log.exception("pace log")
+        if not self.governor.dirty:
+            return
+        self.governor.dirty = False
+        try:
+            async with session_scope() as db:
+                key = await db.get(SelectelKey, self.key_id)
+                if key:
+                    key.pace, key.pace_reason = self.governor.pace, self.governor.reason
+        except Exception:  # noqa: BLE001
+            log.exception("pace save")
+        bus.publish("key", {"id": self.key_id, "pace": self.governor.pace, "pace_reason": self.governor.reason})
+        self._publish()
+
+    def _paced(self, lo: Any, hi: Any) -> float:
+        return self.governor.delay(_jitter(lo, hi))
 
     # ── охота ──────────────────────────────────────────────────────────────
 
@@ -477,8 +565,12 @@ class KeyWorker:
                 raise StopHunt("error", "Selectel отказал во всех подсетях: " + "; ".join(reasons[:3]))
             self.runtime.round += 1
             self.runtime.paused_regions = region_pause
+            self.governor.tick()
+            await self._sync_pace()
+            if self.runtime.round > 1:
+                await self.refresh_heat()
 
-            for target in active:
+            for target in self.round_plan(active):
                 if target.disabled or self.targets_dirty:
                     continue
                 if region_pause.get(target.region, 0.0) > time.monotonic():
@@ -544,20 +636,23 @@ class KeyWorker:
                                        disable=True)
                     continue
 
-                await self._sleep(_jitter(settings_store.get("busy_delay_min"),
-                                          settings_store.get("busy_delay_max")), "hunting")
+                if self.governor.dirty or self.governor.changes:
+                    await self._sync_pace()
+                await self._sleep(self._paced(settings_store.get("busy_delay_min"),
+                                              settings_store.get("busy_delay_max")), "hunting")
 
             self.runtime.current = ""
             every = int(settings_store.get("long_pause_every") or 0)
             if every and self.runtime.round % every == 0:
-                await self._sleep(_jitter(settings_store.get("long_pause_min"),
-                                          settings_store.get("long_pause_max")), "sleeping")
+                await self._sleep(self._paced(settings_store.get("long_pause_min"),
+                                              settings_store.get("long_pause_max")), "sleeping")
             else:
-                await self._sleep(_jitter(settings_store.get("round_delay_min"),
-                                          settings_store.get("round_delay_max")), "sleeping")
+                await self._sleep(self._paced(settings_store.get("round_delay_min"),
+                                              settings_store.get("round_delay_max")), "sleeping")
 
     async def _record_attempt(self, outcome: str, region: str, latency_ms: float | None) -> None:
         metrics.record(self.key_id, region, outcome, latency_ms)
+        self.governor.observe(outcome)
         self.runtime.attempts_run += 1
         # Ответ Selectel по существу (занято / выдал адрес) = связь в порядке, счётчик ошибок с нуля.
         self.consecutive_errors = 0 if outcome in ("busy", "caught", "misses") else self.consecutive_errors + 1
@@ -567,10 +662,15 @@ class KeyWorker:
                 key.attempts_total = (key.attempts_total or 0) + 1
                 if outcome in ("busy", "caught", "misses"):
                     key.last_ok_at = utcnow()
+            if outcome in GOOD and self._current is not None:
+                subnet = await db.get(Subnet, self._current.subnet_id)
+                if subnet:
+                    subnet.attempts_total = (subnet.attempts_total or 0) + 1
 
     async def _attempt(self, target: Target) -> CaughtIP | None:
         assert self.client
         target.attempts += 1
+        self._current = target
         started = time.perf_counter()
         try:
             record = await self.client.create_floating_ip_in_subnet(
@@ -586,6 +686,7 @@ class KeyWorker:
                 await self._record_attempt("busy", target.region, latency)
                 return None
             if status == 429:
+                self.governor.on_rate_limited()
                 await self._record_attempt("errors", target.region, latency)
                 retry_after = exc.response.headers.get("Retry-After", "")
                 delay = float(retry_after) if retry_after.isdigit() else 60.0
@@ -593,10 +694,11 @@ class KeyWorker:
                 await self._sleep(delay, "sleeping")
                 return None
             if status == 403 and "create_floatingip" in message:
+                self.governor.on_ban()
                 await self._record_attempt("errors", target.region, latency)
                 raise StopHunt("banned", "Selectel временно запретил аккаунту получать IP за слишком частые запросы. "
-                                         "Ключ остановлен. Обычно запрет снимается за сутки; "
-                                         "после этого увеличьте паузы в настройках.",
+                                         "Ключ остановлен. Обычно запрет снимается за сутки; после включения "
+                                         f"ключ сам будет искать медленнее (темп ×{self.governor.pace:g}).",
                                disable=True)
             if status in (400, 403, 404):
                 await self._record_attempt("errors", target.region, latency)

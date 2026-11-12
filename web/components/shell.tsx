@@ -6,8 +6,8 @@ import {useEffect, useState} from "react"
 import {Command} from "cmdk"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
 import {
-    ChartLineUp, ClockCounterClockwise, Crosshair, GearSix, Globe, Key, ListBullets, MagnifyingGlass,
-    ShieldCheck, SignOut, SquaresFour, TreeStructure, X, House,
+    ChartLineUp, ClockCounterClockwise, Coins, Crosshair, GearSix, Globe, Key, ListBullets, MagnifyingGlass,
+    ShieldCheck, SignOut, SquaresFour, Storefront, TreeStructure, X, House,
 } from "@phosphor-icons/react"
 import {Toaster} from "sonner"
 import {TOAST_ICONS} from "@/components/toast-icons"
@@ -43,6 +43,7 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
             {href: "/ips", label: "IP на аккаунтах", icon: Crosshair, about: "Что сейчас лежит на аккаунтах"},
             {href: "/history", label: "Найденные IP", icon: ClockCounterClockwise, about: "Все найденные адреса за всё время"},
             {href: "/metrics", label: "Статистика", icon: ChartLineUp, about: "Скорость, ошибки, находки по аккаунтам"},
+            {href: "/finance", label: "Финансы", icon: Coins, about: "Балансы, расходы, журнал доходов"},
         ],
     },
     {
@@ -55,7 +56,10 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
     },
 ]
 
-export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items)
+export const NAV: NavItem[] = [
+    ...NAV_GROUPS.flatMap((g) => g.items),
+    {href: "/market", label: "Маркет IP", icon: Storefront, about: "Скоро: IP и услуги других продавцов"},
+]
 
 // На телефоне внизу — главное; остальное в «Ещё».
 const MOBILE = ["/", "/keys", "/ips", "/metrics"]
@@ -149,6 +153,24 @@ function CommandPalette({open, setOpen}: { open: boolean; setOpen: (v: boolean) 
     )
 }
 
+/** Вход в маркет — рядом с выходом, заметнее обычного пункта меню. */
+function MarketLink({onNavigate, className}: { onNavigate?: () => void; className?: string }) {
+    const pathname = usePathname()
+    const active = pathname.startsWith("/market")
+    return (
+        <Link href="/market" onClick={onNavigate} aria-current={active ? "page" : undefined}
+              className={cn(
+                  "group flex h-11 items-center gap-3 rounded-xl border px-3 text-[14.5px] font-medium transition-[transform,border-color,background-color] duration-150 ease-[cubic-bezier(.2,.8,.2,1)] hover:-translate-y-px active:translate-y-0 active:scale-[0.985] motion-reduce:transform-none",
+                  active ? "border-amber/50 bg-amber/[0.09] text-foreground" : "border-amber/25 bg-amber/[0.04] text-foreground hover:border-amber/45 hover:bg-amber/[0.08]",
+                  className,
+              )}>
+            <Storefront className="size-[19px] text-amber" weight={active ? "fill" : "regular"}/>
+            Маркет IP
+            <span className="ml-auto rounded-full bg-amber/15 px-2 py-0.5 text-[11.5px] font-medium text-amber">скоро</span>
+        </Link>
+    )
+}
+
 async function logout(router: ReturnType<typeof useRouter>) {
     await post("/auth/logout").catch(() => undefined)
     router.replace("/login")
@@ -197,8 +219,9 @@ function Sidebar({onSearch}: { onSearch: () => void }) {
                 <Kbd>Ctrl K</Kbd>
             </button>
             <div className="mt-6 flex-1"><NavLinks/></div>
+            <MarketLink className="mt-4"/>
             <button onClick={() => logout(router)}
-                    className="mt-4 flex h-10 items-center gap-3 rounded-xl px-3 text-[14.5px] text-muted-foreground transition-colors hover:bg-card hover:text-foreground">
+                    className="mt-1.5 flex h-10 items-center gap-3 rounded-xl px-3 text-[14.5px] text-muted-foreground transition-colors hover:bg-card hover:text-foreground">
                 <SignOut className="size-[19px] text-subtle"/>
                 Выйти
             </button>
@@ -244,8 +267,9 @@ function MobileNav() {
                             </DialogPrimitive.Close>
                         </div>
                         <NavLinks onNavigate={() => setOpen(false)}/>
+                        <MarketLink className="mt-4" onNavigate={() => setOpen(false)}/>
                         <button onClick={() => logout(router)}
-                                className="mt-4 flex h-11 w-full items-center gap-3 rounded-xl px-3 text-[15px] text-muted-foreground hover:bg-card-raised">
+                                className="mt-1.5 flex h-11 w-full items-center gap-3 rounded-xl px-3 text-[15px] text-muted-foreground hover:bg-card-raised">
                             <SignOut className="size-5 text-subtle"/>
                             Выйти
                         </button>

@@ -13,6 +13,7 @@ from app import bus
 from app.auth.deps import Current, audit, current_admin
 from app.db.models import RegionPool, Subnet
 from app.db.session import get_db
+from app.engine.heat import Heat, subnet_scores
 from app.engine.manager import manager
 
 router = APIRouter(prefix="/subnets", tags=["subnets"])
@@ -28,20 +29,23 @@ async def _pools(db: AsyncSession) -> list[tuple[str, ipaddress.IPv4Network]]:
     return pools
 
 
-def subnet_view(s: Subnet, offered: bool) -> dict[str, Any]:
+def subnet_view(s: Subnet, offered: bool, heat: Heat | None = None) -> dict[str, Any]:
     return {"id": s.id, "cidr": s.cidr, "region": s.region, "white_count": s.white_count, "enabled": s.enabled,
             "source": s.source, "note": s.note, "caught_total": s.caught_total, "offered": offered,
-            "created_at": s.created_at}
+            "attempts_total": s.attempts_total or 0,
+            "heat": heat.heat if heat else 1.0, "tier": heat.tier if heat else "new",
+            "weight": heat.weight if heat else 1.0, "created_at": s.created_at}
 
 
 @router.get("")
 async def list_subnets(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
     pools = await _pools(db)
     subnets = (await db.execute(select(Subnet))).scalars().all()
+    scores = await subnet_scores(db)
     views = []
     for s in subnets:
         net = ipaddress.ip_network(s.cidr, strict=False)
-        views.append(subnet_view(s, any(net.overlaps(p) for _, p in pools)))
+        views.append(subnet_view(s, any(net.overlaps(p) for _, p in pools), scores.get(s.id)))
     # Сначала включённые и выдаваемые, потом по числу белых.
     views.sort(key=lambda v: (not v["enabled"], not v["offered"], -(v["white_count"] or 0), v["cidr"]))
     return views

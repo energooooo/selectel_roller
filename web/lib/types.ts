@@ -14,6 +14,9 @@ export interface Runtime {
     proxy: string
     next_action_in: number | null
     last_error: string
+    pace?: number
+    pace_reason?: string
+    skipped_cold?: number
 }
 
 export interface Key {
@@ -38,6 +41,8 @@ export interface Key {
     created_at: string
     rate_per_min: number
     runtime: Runtime | null
+    pace: number
+    pace_reason: string
 }
 
 export interface ProxyItem {
@@ -67,6 +72,10 @@ export interface SubnetItem {
     note: string
     caught_total: number
     offered: boolean
+    attempts_total: number
+    heat: number
+    tier: "hot" | "normal" | "cold" | "new"
+    weight: number
 }
 
 export interface Caught {
@@ -87,6 +96,78 @@ export interface Caught {
     checked_at: string | null
     note: string
     source: string
+    client: string
+    tags: string[]
+    expires_at: string | null
+    income: number
+    vds: VdsBrief | null
+}
+
+export interface VdsBrief {
+    id: number
+    status: "creating" | "active" | "error" | "deleting" | "deleted"
+    step: string
+    flavor: string
+    zone: string
+    error: string
+    month_cost: number | null
+    has_password: boolean
+}
+
+export interface VdsQuote {
+    region: string
+    zone: string | null
+    flavor: string
+    server_month: number | null
+    disk_gb: number
+    disk_month: number | null
+    router_month: number
+    total_month: number
+    total_with_router: number
+    available: boolean
+}
+
+export interface AccountMoney {
+    account_id: string
+    keys: string[]
+    balance: number | null
+    hours_left: number | null
+    days_left: number | null
+    error: string
+    checked_at: string | null
+    ips: number
+    ip_month: number
+    vds: number
+    vds_month: number
+    month: number
+    day: number
+}
+
+export type SaleKind = "ip" | "rent" | "vds" | "service" | "other"
+
+export interface Sale {
+    id: number
+    ts: string
+    kind: SaleKind
+    amount: number
+    buyer: string
+    caught_id: number | null
+    ip: string
+    note: string
+}
+
+export interface FinanceSummary {
+    balances: AccountMoney[]
+    balance_total: number
+    cost_month: number
+    cost_day: number
+    ips_held: number
+    income_month: number
+    income_prev_month: number
+    income_total: number
+    profit_month: number
+    by_kind: { kind: SaleKind; label: string; amount: number }[]
+    months: { month: string; income: number }[]
 }
 
 export interface EventItem {
@@ -133,6 +214,7 @@ export type Settings = Record<string, unknown> & {
     request_timeout: number
     connect_timeout: number
     max_consecutive_errors: number
+    start_stagger: number
     proxy_check_interval_min: number
     regions: string[]
     exact_only: boolean
@@ -147,4 +229,14 @@ export type Settings = Record<string, unknown> & {
     bsboard_url: string
     bsboard_key_set: boolean
     bsboard_recheck_hours: number
+    pace_governor: boolean
+    pace_max: number
+    pace_relax_min: number
+    hot_priority: boolean
+    cold_share: number
+    balance_check_min: number
+    balance_warn_days: number
+    ip_expiry_warn_days: number
+    notify_money: boolean
+    vds_disk_gb: number
 }

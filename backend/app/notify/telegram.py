@@ -22,6 +22,7 @@ KIND_FLAGS = {
     "login": "notify_logins",
     "rotation": "notify_rotations",
     "daily": "notify_daily",
+    "money": "notify_money",
 }
 
 

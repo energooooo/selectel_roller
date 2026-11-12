@@ -3,16 +3,29 @@
 import {useEffect, useMemo, useState} from "react"
 import {mutate} from "swr"
 import {toast} from "sonner"
-import {MagnifyingGlass, Plus, Trash, TreeStructure} from "@phosphor-icons/react"
+import {Fire, MagnifyingGlass, Plus, Snowflake, Trash, TreeStructure} from "@phosphor-icons/react"
 import {Badge} from "@/components/status"
 import {Button} from "@/components/ui/button"
 import {Card, Checkbox, Empty, Field, Hint, Input, Mono, PageHeader, Segmented, Skeleton, Switch, Textarea, Tip} from "@/components/ui/primitives"
 import {ApiError, del, patch, post, useApi} from "@/lib/api"
+import {fmtNum} from "@/lib/format"
 import type {SubnetItem} from "@/lib/types"
 
-function Th({children, help}: { children?: React.ReactNode; help?: string }) {
+function HeatBadge({s}: { s: SubnetItem }) {
+    const x = s.heat.toLocaleString("ru", {maximumFractionDigits: 1})
+    if (s.tier === "hot") {
+        return <Badge tone="brand" title={`Адреса находятся в ${x} раза чаще среднего — проверяется первой`}><Fire weight="fill" className="-ml-1 size-3.5"/>Горячая ×{x}</Badge>
+    }
+    if (s.tier === "cold") {
+        return <Badge tone="info" title={`Много попыток без находок (×${x} от среднего) — проверяется не каждый проход`}><Snowflake className="-ml-1 size-3.5"/>Холодная</Badge>
+    }
+    if (s.tier === "new") return <Badge tone="muted" title="Попыток пока мало, чтобы судить">Мало данных</Badge>
+    return <Badge tone="muted" title={`×${x} от среднего`}>Обычная</Badge>
+}
+
+function Th({children, help, right}: { children?: React.ReactNode; help?: string; right?: boolean }) {
     return (
-        <th className="px-4 py-3 text-left text-[13px] font-medium text-muted-foreground first:pl-5 sm:first:pl-6">
+        <th className={`px-4 py-3 text-[13px] font-medium text-muted-foreground first:pl-5 sm:first:pl-6 ${right ? "text-right" : "text-left"}`}>
             <span className="inline-flex items-center gap-1.5">{children}{help && <Hint>{help}</Hint>}</span>
         </th>
     )
@@ -21,6 +34,7 @@ function Th({children, help}: { children?: React.ReactNode; help?: string }) {
 export default function SubnetsPage() {
     const {data} = useApi<SubnetItem[]>("/subnets")
     const [filter, setFilter] = useState<"active" | "off" | "all">("active")
+    const [sort, setSort] = useState<"default" | "heat">("default")
     const [q, setQ] = useState("")
     const [selected, setSelected] = useState<Set<number>>(new Set())
     const [text, setText] = useState("")
@@ -30,11 +44,14 @@ export default function SubnetsPage() {
         if (new URLSearchParams(window.location.search).get("add")) document.getElementById("subnets-input")?.focus()
     }, [])
 
-    const rows = useMemo(() => (data ?? []).filter((s) => {
-        if (filter === "active" && !s.enabled) return false
-        if (filter === "off" && s.enabled) return false
-        return !q || s.cidr.includes(q.trim()) || s.region.includes(q.trim())
-    }), [data, filter, q])
+    const rows = useMemo(() => {
+        const list = (data ?? []).filter((s) => {
+            if (filter === "active" && !s.enabled) return false
+            if (filter === "off" && s.enabled) return false
+            return !q || s.cidr.includes(q.trim()) || s.region.includes(q.trim())
+        })
+        return sort === "heat" ? [...list].sort((a, b) => b.heat - a.heat) : list
+    }, [data, filter, q, sort])
 
     const toggle = async (s: SubnetItem, enabled: boolean) => {
         await patch(`/subnets/${s.id}`, {enabled})
@@ -78,6 +95,9 @@ export default function SubnetsPage() {
                         <MagnifyingGlass className="pointer-events-none absolute left-3.5 top-1/2 size-[18px] -translate-y-1/2 text-subtle"/>
                         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Найти: 81.163 или ru-2" className="pl-10" aria-label="Поиск подсети"/>
                     </div>
+                    <div className="sm:ml-auto">
+                        <Segmented size="sm" value={sort} onChange={setSort} options={[["default", "По порядку"], ["heat", "Сначала горячие"]]}/>
+                    </div>
                 </div>
                 {selected.size > 0 && (
                     <div className="mx-5 mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-amber/30 bg-amber/[0.06] px-4 py-2.5 sm:mx-6">
@@ -90,7 +110,7 @@ export default function SubnetsPage() {
                     </div>
                 )}
                 <div className="mt-4 overflow-x-auto">
-                    <table className="w-full min-w-[720px] text-[14.5px]">
+                    <table className="w-full min-w-[860px] text-[14.5px]">
                         <thead>
                         <tr className="border-y border-border">
                             <th className="w-12 py-3 pl-5 sm:pl-6">
@@ -103,7 +123,8 @@ export default function SubnetsPage() {
                             <Th>Подсеть</Th>
                             <Th help="Облачный регион Selectel, где выдаются адреса из этой подсети. Определяется сам.">Регион</Th>
                             <Th help="Сколько адресов из подсети вам подходят. Заполняется вручную, для справки — на поиск не влияет. Нажмите на число, чтобы изменить.">Подходящих адресов</Th>
-                            <Th>Найдено</Th>
+                            <Th right help="Сколько адресов панель нашла в подсети и за сколько ответов Selectel.">Найдено</Th>
+                            <Th help="Насколько часто здесь находятся адреса по сравнению со средним. Горячие проверяются первыми, холодные — не каждый проход. Обновляется само по мере поиска.">Рейтинг</Th>
                             <Th help="Выдаёт ли Selectel адреса из этой подсети. Если нет — искать в ней бесполезно.">Selectel</Th>
                             <Th>Поиск</Th>
                             <Th/>
@@ -111,7 +132,7 @@ export default function SubnetsPage() {
                         </thead>
                         <tbody>
                         {!data ? (
-                            <tr><td colSpan={8} className="p-5"><Skeleton className="h-48"/></td></tr>
+                            <tr><td colSpan={9} className="p-5"><Skeleton className="h-48"/></td></tr>
                         ) : rows.length ? rows.map((s) => (
                             <tr key={s.id} className="border-b border-border/60 transition-colors last:border-0 hover:bg-card-raised/40">
                                 <td className="py-3 pl-5 sm:pl-6">
@@ -134,7 +155,11 @@ export default function SubnetsPage() {
                                                mutate("/subnets")
                                            }}/>
                                 </td>
-                                <td className="px-4 font-mono tabular">{s.caught_total || <span className="text-subtle">0</span>}</td>
+                                <td className="px-4 text-right font-mono tabular">
+                                    {s.caught_total}
+                                    <span className="block text-[12px] text-subtle">из {fmtNum(s.attempts_total)}</span>
+                                </td>
+                                <td className="px-4"><HeatBadge s={s}/></td>
                                 <td className="px-4">
                                     {s.offered ? <Badge tone="ok">Выдаёт</Badge> : <Badge tone="muted" title={s.note}>Не выдаёт</Badge>}
                                 </td>
@@ -150,7 +175,7 @@ export default function SubnetsPage() {
                                 </td>
                             </tr>
                         )) : (
-                            <tr><td colSpan={8}>
+                            <tr><td colSpan={9}>
                                 <Empty icon={<TreeStructure weight="duotone" className="size-6"/>}
                                        title={filter === "active" ? "Ни одна подсеть не включена" : "Ничего не найдено"}>
                                     {filter === "active" ? "Без включённых подсетей ключам негде искать. Включите нужные в списке «Выключены» или добавьте новые ниже." : "Попробуйте другой запрос."}

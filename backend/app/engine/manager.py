@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 from typing import Any
 
@@ -36,6 +37,16 @@ class WorkerManager:
         self._lock = asyncio.Lock()
         self._background: list[asyncio.Task[Any]] = []
         self._caught_hooks: list[Any] = []
+        self._next_start_at = 0.0  # monotonic: раньше этого момента следующий ключ не входит в Selectel
+
+    def reserve_start_slot(self) -> float:
+        """Очередь запуска: ключи входят в Selectel по одному, с интервалом start_stagger (±25 %).
+        Возвращает, сколько секунд этому ключу ждать своей очереди."""
+        interval = max(0.0, float(settings_store.get("start_stagger") or 0))
+        now = time.monotonic()
+        slot = max(now, self._next_start_at)
+        self._next_start_at = slot + interval * random.uniform(0.75, 1.25)
+        return slot - now
 
     # ── жизненный цикл ─────────────────────────────────────────────────────
 
@@ -141,6 +152,19 @@ class WorkerManager:
         for worker in self.workers.values():
             worker.targets_dirty = True
 
+    def neighbour_banned(self, banned_key_id: int) -> None:
+        """Один аккаунт получил бан за частоту — остальные на всякий случай притормаживают."""
+        for key_id, worker in self.workers.items():
+            if key_id != banned_key_id:
+                worker.governor.on_neighbour_ban()
+
+    async def reset_pace(self, key_id: int) -> None:
+        worker = self.workers.get(key_id)
+        if worker:
+            worker.governor.pace, worker.governor.reason, worker.governor.dirty = 1.0, "", True
+            worker.governor.changes.append("темп сброшен вручную до ×1")
+            await worker._sync_pace()
+
     def settings_changed(self) -> None:
         # Паузы и таймауты воркеры читают сами на каждом шаге; цели зависят от регионов/exact_only.
         self.subnets_changed()
@@ -218,6 +242,18 @@ class WorkerManager:
             await asyncio.sleep(max(5, int(settings_store.get("proxy_check_interval_min") or 30)) * 60)
 
     # ── Selectel-клиент для разовых запросов из API (вкладка «IP») ─────────
+
+    async def proxy_url_for_key(self, key_id: int) -> str | None:
+        """Прокси-URL с липкой сессией ключа — для разовых запросов (баланс, VDS)."""
+        proxy = await self.proxy_for_key(key_id)
+        if not proxy:
+            return None
+        async with session_scope() as db:
+            key = await db.get(SelectelKey, key_id)
+            if key is None:
+                return None
+            return with_session(decrypt(proxy.url_enc), proxy.session_mode, f"tr{key.account_id}",
+                                key.proxy_session_gen or 0)
 
     async def client_for_key(self, key_id: int) -> tuple[SelectelClient, bool]:
         """(клиент, нужно_закрыть). Берёт клиент работающего воркера, иначе создаёт новый."""

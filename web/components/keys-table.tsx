@@ -2,7 +2,7 @@
 
 import {useEffect, useMemo, useRef, useState} from "react"
 import {
-    ArrowsClockwise, CaretDown, CaretLeft, CaretRight, GearSix, MagnifyingGlass, Pause, Play, Trash, X,
+    ArrowsClockwise, CaretDown, CaretLeft, CaretRight, Gauge, GearSix, MagnifyingGlass, Pause, Play, Trash, X,
 } from "@phosphor-icons/react"
 import {toast} from "sonner"
 import {ConfirmDialog} from "@/components/confirm"
@@ -74,6 +74,23 @@ function Checkbox({label, checked, mixed = false, onChange, disabled}: {
     )
 }
 
+/** Темп ключа: множитель пауз от регулятора. ×1 — как в настройках, не показываем. */
+export function paceOf(k: Key, rt?: Runtime | null): { pace: number; reason: string } {
+    return {pace: rt?.pace ?? k.pace ?? 1, reason: rt?.pace_reason ?? k.pace_reason ?? ""}
+}
+
+function PaceBadge({k, rt}: { k: Key; rt?: Runtime | null }) {
+    const {pace, reason} = paceOf(k, rt)
+    if (pace <= 1) return null
+    return (
+        <Tip label={`Паузы длиннее в ${pace.toLocaleString("ru")} раза${reason ? `: ${reason}` : ""}`}>
+            <span tabIndex={0} className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-warn/30 bg-warn/10 px-2 font-mono text-[11.5px] text-warn outline-none focus-visible:ring-2 focus-visible:ring-amber/60">
+                <Gauge aria-hidden className="size-3.5"/>×{pace.toLocaleString("ru")}
+            </span>
+        </Tip>
+    )
+}
+
 function KeyDetails({k, rt}: {k: Key; rt: Runtime | null}) {
     const [region, subnet] = rt?.current.split(" ") ?? []
     const proxy = k.proxy_mode === "none" ? "Без прокси" : k.proxy
@@ -103,12 +120,21 @@ function KeyDetails({k, rt}: {k: Key; rt: Runtime | null}) {
                     <p>Проход {rt.round} · подсети {rt.targets_active} из {rt.targets_total} · в работе {fmtDuration(rt.uptime_s)}
                         {rt.next_action_in != null && <> · следующий запрос через {fmtDuration(rt.next_action_in)}</>}
                     </p>
+                    {(rt.skipped_cold ?? 0) > 0 && (
+                        <p>В этом проходе пропущено холодных подсетей: {rt.skipped_cold}</p>
+                    )}
                     {Object.keys(rt.paused_regions).length > 0 && (
                         <p className="text-warn">
                             Пауза по регионам: {Object.entries(rt.paused_regions).map(([name, seconds]) => `${name} (${seconds} с)`).join(", ")}
                         </p>
                     )}
                 </div>
+            )}
+            {paceOf(k, rt).pace > 1 && (
+                <p className="text-sm leading-relaxed text-warn">
+                    Темп ×{paceOf(k, rt).pace.toLocaleString("ru")}: паузы растянуты, чтобы Selectel не забанил аккаунт
+                    {paceOf(k, rt).reason ? ` — ${paceOf(k, rt).reason}` : ""}. Вернётся к обычному сам, когда станет спокойно.
+                </p>
             )}
             <dl className="grid grid-cols-2 gap-x-4 gap-y-3 lg:grid-cols-3">
                 {fields.map(([label, value]) => (
@@ -176,7 +202,9 @@ function KeyRow({k, runtime, checked, onCheck, locked, onBusyChange, onEdit, ref
                         <Mono className="text-xs text-muted-foreground">{k.held_ips}/{k.ip_goal_effective} IP</Mono>
                     </div>
                 </th>
-                <td className="hidden px-3 md:table-cell"><KeyStatusBadge status={k.status}/></td>
+                <td className="hidden px-3 md:table-cell">
+                    <span className="flex items-center gap-1.5"><KeyStatusBadge status={k.status}/><PaceBadge k={k} rt={rt}/></span>
+                </td>
                 <td className="hidden whitespace-nowrap px-3 text-right md:table-cell">
                     <Mono className={cn("text-sm", k.held_ips > 0 && "text-ok")}>{k.held_ips}</Mono>
                     <Mono className="text-xs text-muted-foreground"> / {k.ip_goal_effective}</Mono>
@@ -203,6 +231,10 @@ function KeyRow({k, runtime, checked, onCheck, locked, onBusyChange, onEdit, ref
                                 label: "Сменить прокси", icon: <ArrowsClockwise/>, disabled: disabled || k.proxy_mode === "none",
                                 onSelect: () => run(() => post(`/keys/${k.id}/rotate-proxy`), "Прокси ключа обновлён"),
                             },
+                            ...(paceOf(k, rt).pace > 1 ? [{
+                                label: "Вернуть обычный темп", icon: <Gauge/>, disabled,
+                                onSelect: () => run(() => post(`/keys/${k.id}/reset-pace`), `${k.name}: темп как в настройках`),
+                            }] : []),
                             "sep",
                             {label: "Удалить ключ", icon: <Trash/>, danger: true, disabled, onSelect: () => setConfirmDelete(true)},
                         ]}/>

@@ -19,6 +19,7 @@ import httpx
 
 IDENTITY_URL = "https://cloud.api.selcloud.ru/identity/v3/auth/tokens"
 RESELL_BASE_URL = "https://api.selectel.ru/vpc/resell/v2"
+BILLING_BASE_URL = "https://api.selectel.ru"  # https://docs.selectel.ru/api/balance/
 
 
 @dataclass
@@ -151,6 +152,32 @@ class SelectelResellClient:
             response = await self._client.request(method, url, headers=self._headers(), **kwargs)
         response.raise_for_status()
         return response
+
+    async def _billing_get(self, url: str) -> dict[str, Any]:
+        await self.ensure_authenticated()
+        response = await self._client.get(url, headers=self._headers())
+        response.raise_for_status()
+        return response.json()
+
+    async def get_balance(self) -> tuple[float | None, int | None]:
+        """(баланс ₽, на сколько часов хватит по прогнозу Selectel). Billing API: суммы в копейках."""
+        data = (await self._billing_get(f"{BILLING_BASE_URL}/v3/balances")).get("data") or {}
+        billings = [b for b in data.get("billings") or [] if isinstance(b, dict)]
+        primary = next((b for b in billings if b.get("billing_type") == "primary"), billings[0] if billings else None)
+        balance = None
+        if primary is not None:
+            raw = primary.get("final_sum")
+            if raw is None:
+                raw = primary.get("balances_values_sum")
+            balance = round(float(raw) / 100, 2) if raw is not None else None
+        hours = None
+        try:
+            pred = (await self._billing_get(f"{BILLING_BASE_URL}/v2/billing/prediction")).get("data") or {}
+            value = pred.get("primary") if pred.get("primary") is not None else pred.get("vpc")
+            hours = int(value) if value is not None else None
+        except (httpx.HTTPError, ValueError, TypeError):
+            hours = None
+        return balance, hours
 
     async def list_projects(self) -> list[ResellProject]:
         response = await self._request("GET", "/projects")

@@ -44,6 +44,8 @@ def key_view(key: SelectelKey, proxy: Proxy | None = None, held: int = 0) -> dic
         "held_ips": held, "last_ok_at": key.last_ok_at, "last_caught_at": key.last_caught_at,
         "created_at": key.created_at, "rate_per_min": metrics.rate_per_minute(key.id),
         "runtime": runtime,
+        "pace": (runtime or {}).get("pace", key.pace or 1.0),
+        "pace_reason": (runtime or {}).get("pace_reason", key.pace_reason or ""),
     }
 
 async def _view(db: AsyncSession, key: SelectelKey) -> dict[str, Any]:
@@ -418,6 +420,20 @@ async def rotate_proxy(key_id: int, current: Current = Depends(current_admin),
     await audit(current, "key.rotate_proxy", key.name)
     if key.enabled:
         await manager.restart_key(key.id)
+    return await _view(db, key)
+
+
+@router.post("/{key_id}/reset-pace")
+async def reset_pace(key_id: int, current: Current = Depends(current_admin),
+                     db: AsyncSession = Depends(get_db)) -> dict:
+    """Вернуть темп ключа к настройкам (×1) — например, когда бан точно снят."""
+    key = await db.get(SelectelKey, key_id)
+    if key is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key.pace, key.pace_reason = 1.0, ""
+    await db.commit()
+    await manager.reset_pace(key_id)
+    await audit(current, "key.reset_pace", key.name)
     return await _view(db, key)
 
 

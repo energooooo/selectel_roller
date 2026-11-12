@@ -2,11 +2,14 @@
 
 import {useState} from "react"
 import {toast} from "sonner"
-import {ArrowsClockwise, Copy, Crosshair, ShieldCheck, Trash} from "@phosphor-icons/react"
+import {ArrowsClockwise, Coins, Copy, Crosshair, Desktop, Key as KeyIcon, NotePencil, ShieldCheck, Trash} from "@phosphor-icons/react"
+import {mutate} from "swr"
 import {ConfirmDialog} from "@/components/confirm"
+import {InventoryDialog, InventoryLine, VdsAccessDialog, VdsCreateDialog} from "@/components/ip-inventory"
+import {SaleDialog} from "@/components/sale-dialog"
 import {Badge, CHECK_STATUS} from "@/components/status"
 import {Button} from "@/components/ui/button"
-import {Card, CardHeader, Checkbox, Empty, Hint, Mono, PageHeader, Skeleton, Tip} from "@/components/ui/primitives"
+import {ActionMenu, Card, CardHeader, Checkbox, Empty, Hint, Mono, PageHeader, Skeleton, Tip} from "@/components/ui/primitives"
 import {ApiError, patch, post, useApi} from "@/lib/api"
 import {fmtAgo, fmtDateTime} from "@/lib/format"
 import type {Caught, FloatingIp, Key} from "@/lib/types"
@@ -15,7 +18,10 @@ function copy(ip: string) {
     navigator.clipboard.writeText(ip).then(() => toast.success(`${ip} скопирован`))
 }
 
-function AccountIps({k}: { k: Key }) {
+type IpDialog = { type: "inventory" | "sale" | "vds" | "access" | "vds-delete"; c: Caught }
+
+function AccountIps({k, details}: { k: Key; details: Record<number, Caught> }) {
+    const [dialog, setDialog] = useState<IpDialog | null>(null)
     const {data, error, isLoading, mutate: reload} = useApi<{ items: FloatingIp[] }>(`/keys/${k.id}/floating-ips`, {
         revalidateOnFocus: false,
     })
@@ -46,7 +52,7 @@ function AccountIps({k}: { k: Key }) {
                     <Skeleton className="h-12"/>
                 ) : data.items.length ? (
                     <div className="overflow-x-auto">
-                        <table className="w-full min-w-[620px] text-[13.5px]">
+                        <table className="w-full min-w-[720px] text-[13.5px]">
                             <thead>
                             <tr className="text-left">
                                 <th className="pb-2.5 pr-4 text-left text-[13px] font-medium text-muted-foreground">IP</th>
@@ -68,6 +74,7 @@ function AccountIps({k}: { k: Key }) {
                                             <Mono className="text-[13px] text-foreground">{f.ip}</Mono>
                                             <Tip label="Скопировать"><button onClick={() => copy(f.ip)} aria-label={`Скопировать ${f.ip}`} className="grid size-8 place-items-center rounded-lg text-subtle hover:bg-card-raised hover:text-amber"><Copy className="size-[18px]"/></button></Tip>
                                         </span>
+                                        {f.caught && details[f.caught.id] && <InventoryLine c={details[f.caught.id]}/>}
                                     </td>
                                     <td className="pr-4 font-mono text-[12.5px] text-muted-foreground">{f.region}</td>
                                     <td className="pr-4 text-[12.5px]">
@@ -85,12 +92,36 @@ function AccountIps({k}: { k: Key }) {
                                         ) : <span className="text-subtle">—</span>}
                                     </td>
                                     <td className="text-right">
+                                        <div className="flex items-center justify-end gap-1">
+                                        {f.caught && details[f.caught.id] && (() => {
+                                            const c = details[f.caught.id]
+                                            const vds = c.vds
+                                            return (
+                                                <ActionMenu label={`Действия с ${f.ip}`} items={[
+                                                    {label: "Учёт и срок", icon: <NotePencil/>, onSelect: () => setDialog({type: "inventory", c})},
+                                                    {label: "Записать доход", icon: <Coins/>, onSelect: () => setDialog({type: "sale", c})},
+                                                    "sep",
+                                                    ...(vds && vds.status === "active" && vds.has_password
+                                                        ? [{label: "Доступ к серверу", icon: <KeyIcon/>, onSelect: () => setDialog({type: "access", c})}]
+                                                        : []),
+                                                    ...(!vds ? [{
+                                                        label: "Поднять сервер под IP", icon: <Desktop/>, disabled: f.attached,
+                                                        onSelect: () => setDialog({type: "vds", c}),
+                                                    }] : []),
+                                                    ...(vds && vds.status !== "creating" && vds.status !== "deleting" ? [{
+                                                        label: vds.status === "error" && !vds.has_password ? "Убрать ошибку сервера" : "Удалить сервер",
+                                                        icon: <Trash/>, danger: true, onSelect: () => setDialog({type: "vds-delete", c}),
+                                                    }] : []),
+                                                ]}/>
+                                            )
+                                        })()}
                                         <button aria-label={`Удалить ${f.ip} с аккаунта`} title={f.caught?.protected ? "Адрес защищён — сначала снимите «Не удалять»" : "Удалить с аккаунта"}
                                                 disabled={f.caught?.protected}
                                                 onClick={() => setDeleting(f)}
                                                 className="grid size-10 place-items-center rounded-xl text-subtle transition-colors enabled:hover:bg-danger/10 enabled:hover:text-danger disabled:opacity-30">
                                             <Trash className="size-[18px]"/>
                                         </button>
+                                        </div>
                                     </td>
                                 </tr>
                             ))}
@@ -101,6 +132,26 @@ function AccountIps({k}: { k: Key }) {
                     <p className="text-[14px] text-muted-foreground">На этом аккаунте сейчас нет плавающих IP.</p>
                 )}
             </div>
+            {dialog?.type === "inventory" && <InventoryDialog c={dialog.c} onOpenChange={(v) => !v && setDialog(null)}/>}
+            {dialog?.type === "vds" && <VdsCreateDialog c={dialog.c} onOpenChange={(v) => !v && setDialog(null)}/>}
+            {dialog?.type === "access" && <VdsAccessDialog c={dialog.c} onOpenChange={(v) => !v && setDialog(null)}/>}
+            <SaleDialog open={dialog?.type === "sale"} caught={dialog?.type === "sale" ? dialog.c : null}
+                        onOpenChange={(v) => !v && setDialog(null)}/>
+            {dialog?.type === "vds-delete" && dialog.c.vds && (
+                <ConfirmDialog open onOpenChange={(v) => !v && setDialog(null)} danger confirmLabel="Удалить сервер"
+                               title={`Удалить сервер под ${dialog.c.ip}?`}
+                               description="Сервер и его диск удалятся вместе с данными. Адрес отвяжется и останется на аккаунте."
+                               typeToConfirm={dialog.c.ip}
+                               onConfirm={async () => {
+                                   try {
+                                       await post(`/vds/${dialog.c.vds!.id}/delete`, {confirm_ip: dialog.c.ip})
+                                       toast.success("Сервер удаляется", {description: "Адрес останется на аккаунте."})
+                                       mutate((key) => typeof key === "string" && key.startsWith("/caught"))
+                                   } catch (e) {
+                                       toast.error(e instanceof ApiError ? e.message : "Не получилось")
+                                   }
+                               }}/>
+            )}
             {deleting && (
                 <ConfirmDialog open onOpenChange={(v) => !v && setDeleting(null)} danger confirmLabel="Удалить IP"
                                title={`Удалить ${deleting.ip} с аккаунта?`}
@@ -123,12 +174,14 @@ function AccountIps({k}: { k: Key }) {
 export default function IpsPage() {
     const {data: keys} = useApi<Key[]>("/keys")
     const {data: released} = useApi<Caught[]>("/caught?on_account=false")
+    const {data: held} = useApi<Caught[]>("/caught?on_account=true")
+    const details = Object.fromEntries((held ?? []).map((c) => [c.id, c])) as Record<number, Caught>
     return (
         <>
             <PageHeader title="IP на аккаунтах"
                         description="Плавающие IP, которые сейчас лежат на каждом аккаунте Selectel. Подходящие выделены, найденные панелью защищены от случайного удаления."/>
             <div className="space-y-3">
-                {!keys ? <Skeleton className="h-32 rounded-2xl"/> : keys.length ? keys.map((k) => <AccountIps key={k.id} k={k}/>) : (
+                {!keys ? <Skeleton className="h-32 rounded-2xl"/> : keys.length ? keys.map((k) => <AccountIps key={k.id} k={k} details={details}/>) : (
                     <Card><Empty icon={<Crosshair weight="duotone" className="size-6"/>} title="Нет ключей">Добавьте ключ Selectel — здесь появятся адреса с его аккаунта.</Empty></Card>
                 )}
                 <Card>

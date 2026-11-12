@@ -197,6 +197,11 @@ export default function SettingsPage() {
                          hint="Без лишних выданных и возвращённых адресов.">
                         <Switch checked={Boolean(form.exact_only)} onChange={(v) => set("exact_only", v)} label="Только целиком подходящие подсети"/>
                     </Row>
+                    <Row label="Запускать ключи по очереди, каждые"
+                         help="Когда стартует сразу много ключей (после перезапуска панели или «Запустить все»), они входят в Selectel по одному с этим интервалом — без всплеска запросов и рейт-лимитов."
+                         hint="0 — все сразу.">
+                        <Num k="start_stagger" form={form} set={set} unit="с" min={0}/>
+                    </Row>
                     <Row label="Останавливать ключ после ошибок подряд" hint="0 — не останавливать.">
                         <Num k="max_consecutive_errors" form={form} set={set}/>
                     </Row>
@@ -220,6 +225,45 @@ export default function SettingsPage() {
                             ))}
                         </div>
                     </div>
+                </Section>
+
+                <Section title="Темп и приоритет"
+                         text="Панель сама подстраивает скорость под Selectel и чаще заглядывает туда, где адреса освобождаются.">
+                    <Row label="Регулятор темпа"
+                         help="Если Selectel просит снизить частоту (429), начинает отвечать ошибками или банит соседний аккаунт, паузы ключа растягиваются. Когда долго всё спокойно, темп возвращается к настройкам. После бана аккаунта ключ при следующем запуске сам ищет медленнее."
+                         hint="Множитель пауз виден в списке ключей.">
+                        <Switch checked={Boolean(form.pace_governor)} onChange={(v) => set("pace_governor", v)} label="Регулятор темпа"/>
+                    </Row>
+                    <Row label="Замедлять не больше чем в" hint="Например, 4 — пауза 10 с станет максимум 40 с.">
+                        <Num k="pace_max" form={form} set={set} unit="раза" min={1} step={0.5}/>
+                    </Row>
+                    <Row label="Ускорять, если всё спокойно" hint="Сколько минут без сигналов от Selectel до следующего шага разгона.">
+                        <Num k="pace_relax_min" form={form} set={set} unit="мин" min={1}/>
+                    </Row>
+                    <Row label="Горячие подсети первыми"
+                         help="Подсети, где адреса находились чаще среднего, проверяются в начале каждого прохода. Холодные — где тысячи попыток ничего не дали — пропускаются в части проходов. Запросов от этого только меньше."
+                         hint="Рейтинг подсетей — на странице «Подсети».">
+                        <Switch checked={Boolean(form.hot_priority)} onChange={(v) => set("hot_priority", v)} label="Горячие подсети первыми"/>
+                    </Row>
+                    <Row label="Холодные подсети проверять" hint="Доля проходов: 0,35 — примерно каждый третий.">
+                        <Num k="cold_share" form={form} set={set} min={0.05} step={0.05}/>
+                    </Row>
+                </Section>
+
+                <Section title="Деньги"
+                         text="Баланс аккаунтов Selectel и сроки выданных IP. Предупреждения приходят в Telegram.">
+                    <Row label="Проверять баланс каждые">
+                        <Num k="balance_check_min" form={form} set={set} unit="мин" min={10}/>
+                    </Row>
+                    <Row label="Предупреждать, когда денег осталось меньше чем на" hint="0 — не предупреждать.">
+                        <Num k="balance_warn_days" form={form} set={set} unit="дн." min={0}/>
+                    </Row>
+                    <Row label="Напоминать о сроке IP за" hint="Срок задаётся у адреса на странице «IP на аккаунтах». 0 — не напоминать.">
+                        <Num k="ip_expiry_warn_days" form={form} set={set} unit="дн." min={0}/>
+                    </Row>
+                    <Row label="Диск сервера под IP" hint="Размер загрузочного диска, когда панель поднимает сервер под адрес.">
+                        <Num k="vds_disk_gb" form={form} set={set} unit="ГБ" min={5}/>
+                    </Row>
                 </Section>
 
                 <Section title="Уведомления в Telegram"
@@ -265,6 +309,9 @@ export default function SettingsPage() {
                         </Row>
                         <Row label="Смена внешнего IP у прокси"><Switch checked={Boolean(form.notify_rotations)} onChange={(v) => set("notify_rotations", v)} label="Смена внешнего IP"/></Row>
                         <Row label="Итоги дня в 9:00 по Москве"><Switch checked={Boolean(form.notify_daily)} onChange={(v) => set("notify_daily", v)} label="Итоги дня"/></Row>
+                        <Row label="Деньги и сроки" hint="Мало денег на аккаунте, подходит срок IP, сервер под IP готов.">
+                            <Switch checked={Boolean(form.notify_money)} onChange={(v) => set("notify_money", v)} label="Деньги и сроки"/>
+                        </Row>
                     </div>
                 </Section>
 

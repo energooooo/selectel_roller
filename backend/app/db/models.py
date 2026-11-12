@@ -180,6 +180,9 @@ class SelectelKey(Base):
     caught_total: Mapped[int] = mapped_column(Integer, default=0)
     last_ok_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     last_caught_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    # Регулятор темпа: множитель пауз (×1 = как в настройках) и почему он такой.
+    pace: Mapped[float] = mapped_column(Float, default=1.0, server_default="1")
+    pace_reason: Mapped[str] = mapped_column(String(200), default="", server_default="")
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
 
 
@@ -194,6 +197,8 @@ class Subnet(Base):
     source: Mapped[str] = mapped_column(String(16), default="manual")  # import / manual
     note: Mapped[str] = mapped_column(String(200), default="")
     caught_total: Mapped[int] = mapped_column(Integer, default=0)
+    # Попытки с ответом Selectel по существу — для рейтинга подсетей (app.engine.heat).
+    attempts_total: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
 
 
@@ -236,6 +241,65 @@ class CaughtIP(Base):
     checked_at: Mapped[datetime | None] = mapped_column(TZDateTime())
     note: Mapped[str] = mapped_column(String(200), default="")
     source: Mapped[str] = mapped_column(String(16), default="hunt")  # hunt / import / adopted
+    # Учёт: кому отдан, метки, до какого числа оплачен/выдан.
+    client: Mapped[str] = mapped_column(String(120), default="", server_default="")
+    tags: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    expires_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    expiry_notified_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+
+
+class Sale(Base):
+    """Журнал доходов: продажа или аренда IP, сервера, услуги."""
+
+    __tablename__ = "sales"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ts: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow, index=True)  # когда получены деньги
+    kind: Mapped[str] = mapped_column(String(16), default="ip")  # ip / rent / vds / service / other
+    amount: Mapped[float] = mapped_column(Float)  # ₽
+    buyer: Mapped[str] = mapped_column(String(120), default="")
+    caught_id: Mapped[int | None] = mapped_column(ForeignKey("caught_ips.id", ondelete="SET NULL"))
+    ip: Mapped[str] = mapped_column(String(64), default="")  # копия: переживает удаление записи об IP
+    note: Mapped[str] = mapped_column(String(300), default="")
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+
+
+class AccountBalance(Base):
+    """Последний известный баланс аккаунта Selectel (обновляется фоном)."""
+
+    __tablename__ = "account_balances"
+
+    account_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    balance: Mapped[float | None] = mapped_column(Float)  # ₽
+    hours_left: Mapped[int | None] = mapped_column(Integer)  # прогноз Selectel
+    error: Mapped[str] = mapped_column(String(300), default="")
+    checked_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    warned_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+
+
+class Vds(Base):
+    """Сервер, поднятый панелью под пойманный IP."""
+
+    __tablename__ = "vds"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    caught_id: Mapped[int | None] = mapped_column(ForeignKey("caught_ips.id", ondelete="SET NULL"), index=True)
+    key_id: Mapped[int | None] = mapped_column(ForeignKey("selectel_keys.id", ondelete="SET NULL"))
+    account_id: Mapped[str] = mapped_column(String(32), default="")
+    ip: Mapped[str] = mapped_column(String(64), default="")
+    region: Mapped[str] = mapped_column(String(16), default="")
+    zone: Mapped[str] = mapped_column(String(16), default="")
+    name: Mapped[str] = mapped_column(String(64), default="")
+    flavor: Mapped[str] = mapped_column(String(64), default="")
+    server_id: Mapped[str] = mapped_column(String(64), default="")
+    port_id: Mapped[str] = mapped_column(String(64), default="")
+    # creating / active / error / deleting / deleted
+    status: Mapped[str] = mapped_column(String(16), default="creating")
+    step: Mapped[str] = mapped_column(String(200), default="")
+    error: Mapped[str] = mapped_column(Text, default="")
+    password_enc: Mapped[str | None] = mapped_column(Text)
+    month_cost: Mapped[float | None] = mapped_column(Float)  # ₽/мес по прайсу на момент создания
+    created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
 
 
 class Event(Base):

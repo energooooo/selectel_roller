@@ -10,6 +10,13 @@ const fullFmt = new Intl.DateTimeFormat("ru-RU", {
 const numFmt = new Intl.NumberFormat("ru-RU")
 
 export const fmtNum = (n: number | null | undefined) => (n == null ? "—" : numFmt.format(n))
+const rubFmt = new Intl.NumberFormat("ru-RU", {maximumFractionDigits: 0})
+const rubFmt2 = new Intl.NumberFormat("ru-RU", {minimumFractionDigits: 0, maximumFractionDigits: 2})
+/** «12 340 ₽»; exact — с копейками, если они есть. */
+export const fmtRub = (n: number | null | undefined, exact = false) =>
+    n == null ? "—" : `${(exact ? rubFmt2 : rubFmt).format(n)} ₽`
+const dateFmt = new Intl.DateTimeFormat("ru-RU", {timeZone: "Europe/Moscow", day: "numeric", month: "short", year: "numeric"})
+export const fmtDate = (iso: string | null | undefined) => (iso ? dateFmt.format(new Date(iso)) : "—")
 export const fmtTime = (iso: string | null | undefined) => (iso ? timeFmt.format(new Date(iso)) : "—")
 export const fmtDateTime = (iso: string | null | undefined) => (iso ? dateTimeFmt.format(new Date(iso)) : "—")
 export const fmtFull = (iso: string | null | undefined) => (iso ? fullFmt.format(new Date(iso)) : "—")
