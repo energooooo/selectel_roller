@@ -63,12 +63,16 @@ function Row({label, help, hint, children}: { label: string; help?: string; hint
     )
 }
 
+/** Колонка единиц измерения одной ширины у всех полей — тогда поля стоят ровно друг под другом. */
+const UNIT = "w-[4.5rem] shrink-0 text-[14px] text-muted-foreground"
+
 function Num({k, form, set, unit, min = 0, step = 1}: { k: string; form: Form; set: (k: string, v: unknown) => void; unit?: string; min?: number; step?: number }) {
     return (
         <div className="flex items-center gap-2">
             <Input type="number" min={min} step={step} value={String(form[k] ?? "")} aria-label={k}
                    onChange={(e) => set(k, e.target.value === "" ? "" : Number(e.target.value))} className="w-24 font-mono"/>
-            {unit && <span className="w-12 text-[14px] text-muted-foreground">{unit}</span>}
+            {/* Место под единицы есть всегда — даже пустое, чтобы все поля стояли в одну колонку. */}
+            <span className={UNIT}>{unit}</span>
         </div>
     )
 }
@@ -76,9 +80,9 @@ function Num({k, form, set, unit, min = 0, step = 1}: { k: string; form: Form; s
 function Range({lo, hi, form, set}: { lo: string; hi: string; form: Form; set: (k: string, v: unknown) => void }) {
     return (
         <div className="flex items-center gap-2 text-[14px] text-muted-foreground">
-            от <Input type="number" min={0} step="0.5" value={String(form[lo] ?? "")} aria-label={`${lo}`} onChange={(e) => set(lo, Number(e.target.value))} className="w-20 font-mono"/>
-            до <Input type="number" min={0} step="0.5" value={String(form[hi] ?? "")} aria-label={`${hi}`} onChange={(e) => set(hi, Number(e.target.value))} className="w-20 font-mono"/>
-            с
+            от <Input type="number" min={0} step="0.5" value={String(form[lo] ?? "")} aria-label={`${lo}`} onChange={(e) => set(lo, Number(e.target.value))} className="w-24 font-mono"/>
+            до <Input type="number" min={0} step="0.5" value={String(form[hi] ?? "")} aria-label={`${hi}`} onChange={(e) => set(hi, Number(e.target.value))} className="w-24 font-mono"/>
+            <span className={UNIT}>с</span>
         </div>
     )
 }
