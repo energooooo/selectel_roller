@@ -52,6 +52,20 @@ class Admin(Base):
     backup_codes: Mapped[list[Any]] = mapped_column(JSON, default=list)
     created_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
     password_changed_at: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow)
+    # owner — владелец панели (видит все кабинеты, настройки, заявки); user — свой кабинет.
+    role: Mapped[str] = mapped_column(String(16), default="user", server_default="owner")
+    # pending — ждёт одобрения в админ-боте; active; rejected; blocked.
+    status: Mapped[str] = mapped_column(String(16), default="pending", server_default="active")
+    description: Mapped[str] = mapped_column(String(500), default="", server_default="")
+    reg_ip: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    reg_user_agent: Mapped[str] = mapped_column(String(300), default="", server_default="")
+    decided_at: Mapped[datetime | None] = mapped_column(TZDateTime())
+    decided_by: Mapped[str] = mapped_column(String(64), default="", server_default="")  # tg id или логин
+    tg_message_id: Mapped[int | None] = mapped_column(Integer)  # заявка в админ-боте — чтобы обновить её
+
+    @property
+    def is_owner(self) -> bool:
+        return self.role == "owner"
 
 
 class Session(Base):
@@ -94,6 +108,8 @@ class Account(Base):
     __tablename__ = "accounts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     account_id: Mapped[str] = mapped_column(String(32), unique=True, index=True)
     email: Mapped[str] = mapped_column(String(254), default="")
     password_enc: Mapped[str | None] = mapped_column(Text)
@@ -136,11 +152,14 @@ class AuditLog(Base):
 
 class Proxy(Base):
     __tablename__ = "proxies"
+    __table_args__ = (UniqueConstraint("owner_id", "fingerprint", name="uq_proxies_owner_fingerprint"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     url_enc: Mapped[str] = mapped_column(Text)
     # Отпечаток URL (sha256) — чтобы отсекать дубликаты, не расшифровывая всё подряд.
-    fingerprint: Mapped[str] = mapped_column(String(64), unique=True)
+    fingerprint: Mapped[str] = mapped_column(String(64))
     display: Mapped[str] = mapped_column(String(200))  # scheme://host:port без кредов
     label: Mapped[str] = mapped_column(String(100), default="")
     kind: Mapped[str] = mapped_column(String(16), default="http")
@@ -161,6 +180,8 @@ class SelectelKey(Base):
     __tablename__ = "selectel_keys"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     name: Mapped[str] = mapped_column(String(100))
     account_id: Mapped[str] = mapped_column(String(32), index=True)
     auth_type: Mapped[str] = mapped_column(String(16), default="service_user")
@@ -188,9 +209,12 @@ class SelectelKey(Base):
 
 class Subnet(Base):
     __tablename__ = "subnets"
+    __table_args__ = (UniqueConstraint("owner_id", "cidr", name="uq_subnets_owner_cidr"),)
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    cidr: Mapped[str] = mapped_column(String(32), unique=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
+    cidr: Mapped[str] = mapped_column(String(32))
     region: Mapped[str] = mapped_column(String(16), default="")  # заполняется по пулам Selectel
     white_count: Mapped[int | None] = mapped_column(Integer)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
@@ -224,6 +248,8 @@ class CaughtIP(Base):
     __tablename__ = "caught_ips"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     ip: Mapped[str] = mapped_column(String(64), index=True)
     region: Mapped[str] = mapped_column(String(16))
     key_id: Mapped[int | None] = mapped_column(ForeignKey("selectel_keys.id", ondelete="SET NULL"))
@@ -254,6 +280,8 @@ class Sale(Base):
     __tablename__ = "sales"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     ts: Mapped[datetime] = mapped_column(TZDateTime(), default=utcnow, index=True)  # когда получены деньги
     kind: Mapped[str] = mapped_column(String(16), default="ip")  # ip / rent / vds / service / other
     amount: Mapped[float] = mapped_column(Float)  # ₽
@@ -283,6 +311,8 @@ class Vds(Base):
     __tablename__ = "vds"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    # Чей кабинет: запись видит её владелец и владелец панели (role=owner).
+    owner_id: Mapped[int | None] = mapped_column(ForeignKey("admins.id", ondelete="SET NULL"), index=True)
     caught_id: Mapped[int | None] = mapped_column(ForeignKey("caught_ips.id", ondelete="SET NULL"), index=True)
     key_id: Mapped[int | None] = mapped_column(ForeignKey("selectel_keys.id", ondelete="SET NULL"))
     account_id: Mapped[str] = mapped_column(String(32), default="")

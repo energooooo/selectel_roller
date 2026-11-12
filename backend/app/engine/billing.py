@@ -22,7 +22,7 @@ from app.core.crypto import decrypt
 from app.db.models import AccountBalance, CaughtIP, SelectelKey, Vds, utcnow
 from app.db.session import session_scope
 from app.engine.resell import SelectelResellClient
-from app.notify.telegram import esc, notify
+from app.notify.telegram import esc, notify, panel_owner_ids
 
 log = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def router_month(table: dict[tuple[str, str], float], region: str) -> float:
 # ── сводка по аккаунтам ──────────────────────────────────────────────────────
 
 async def account_costs() -> dict[str, dict[str, Any]]:
-    """Сколько в месяц стоит то, что панель держит на каждом аккаунте: IP + серверы."""
+    """Сколько в месяц стоит то, что панель держит на каждом аккаунте: IP + серверы (по всем кабинетам)."""
     table = await prices()
     out: dict[str, dict[str, Any]] = defaultdict(lambda: {"ips": 0, "ip_month": 0.0, "vds": 0, "vds_month": 0.0})
     async with session_scope() as db:
@@ -129,13 +129,15 @@ def days_left(balance: float | None, hours_left: int | None, day_cost: float) ->
 
 # ── балансы ──────────────────────────────────────────────────────────────────
 
-async def refresh_balances() -> list[dict[str, Any]]:
+async def refresh_balances(only: set[str] | None = None) -> list[dict[str, Any]]:
     from app.engine.manager import manager  # noqa: PLC0415 — менеджер импортирует движок, цикл импорта
 
     async with session_scope() as db:
         keys = (await db.execute(select(SelectelKey).order_by(SelectelKey.enabled.desc(), SelectelKey.id))).scalars().all()
         by_account: dict[str, SelectelKey] = {}
         for k in keys:
+            if only is not None and k.account_id not in only:
+                continue
             if k.account_id and k.password_enc and k.account_id not in by_account:
                 by_account[k.account_id] = k
         creds = {acc: (k.id, k.username, decrypt(k.password_enc)) for acc, k in by_account.items()}
@@ -173,10 +175,11 @@ async def refresh_balances() -> list[dict[str, Any]]:
     await asyncio.gather(*(one(acc, *c) for acc, c in creds.items()), return_exceptions=True)
     await warn_low_balances()
     bus.publish("money", {})
-    return await balances_view()
+    return await balances_view(only)
 
 
-async def balances_view() -> list[dict[str, Any]]:
+async def balances_view(only: set[str] | None = None) -> list[dict[str, Any]]:
+    """only — номера аккаунтов кабинета (None — все, для владельца панели и фоновых проверок)."""
     costs = await account_costs()
     async with session_scope() as db:
         rows = {b.account_id: b for b in (await db.execute(select(AccountBalance))).scalars()}
@@ -185,6 +188,8 @@ async def balances_view() -> list[dict[str, Any]]:
     for k in keys:
         names[k.account_id].append(k.name)
     accounts = sorted(set(names) | set(rows) | set(costs))
+    if only is not None:
+        accounts = [a for a in accounts if a in only]
     out = []
     for acc in accounts:
         b = rows.get(acc)
@@ -209,7 +214,11 @@ async def warn_low_balances() -> None:
     if warn_days <= 0:
         return
     now = utcnow()
-    for row in await balances_view():
+    # В бот панели — только аккаунты кабинета владельца; чужие балансы ему не шлём.
+    async with session_scope() as db:
+        mine = set((await db.execute(select(SelectelKey.account_id).where(
+            SelectelKey.owner_id.in_(await panel_owner_ids())))).scalars())
+    for row in await balances_view(mine):
         left = row["days_left"]
         if left is None or left >= warn_days:
             continue
@@ -240,7 +249,7 @@ async def warn_expiring_ips() -> None:
     async with session_scope() as db:
         rows = (await db.execute(select(CaughtIP).where(
             CaughtIP.expires_at.is_not(None), CaughtIP.expires_at <= horizon,
-            CaughtIP.expiry_notified_at.is_(None)))).scalars().all()
+            CaughtIP.expiry_notified_at.is_(None), CaughtIP.owner_id.in_(await panel_owner_ids())))).scalars().all()
         for c in rows:
             c.expiry_notified_at = now
             left = (c.expires_at - now).total_seconds() / 86400

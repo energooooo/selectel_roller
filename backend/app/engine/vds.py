@@ -25,7 +25,7 @@ from app.db.session import session_scope
 from app.engine import billing
 from app.engine.selectel import SelectelClient
 from app.events import emit
-from app.notify.telegram import esc, notify
+from app.notify.telegram import esc, notify_for
 
 log = logging.getLogger(__name__)
 
@@ -193,6 +193,7 @@ async def create(vds_id: int) -> None:
         if v is None or caught is None or v.key_id is None:
             return
         key_id, region, fip_id, ip, name = v.key_id, caught.region, caught.floating_ip_id, caught.ip, v.name
+        owner_id = v.owner_id
     client: SelectelClient | None = None
     owned = False
     port_id = server_id = ""
@@ -269,7 +270,7 @@ async def create(vds_id: int) -> None:
         await _set(vds_id, status="active", step="Готово", error="", password_enc=encrypt(password))
         await emit(f"сервер {name} поднят под IP {ip} ({region})", level="success", kind="vds",
                    data={"vds_id": vds_id, "ip": ip})
-        await notify("money", f"🖥 Сервер под <code>{esc(ip)}</code> готов: root, пароль — в панели (раздел «IP на аккаунтах»).")
+        await notify_for(owner_id, "money", f"🖥 Сервер под <code>{esc(ip)}</code> готов: root, пароль — в панели (раздел «IP на аккаунтах»).")
     except Exception as exc:  # noqa: BLE001
         log.exception("vds create %s", vds_id)
         msg = str(exc) if isinstance(exc, VdsError) else short(exc)

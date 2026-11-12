@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from app.db.models import CaughtIP, MetricPoint, SelectelKey, utcnow
 from app.db.session import session_scope
-from app.notify.telegram import esc, notify
+from app.notify.telegram import esc, notify, panel_owner_ids
 
 log = logging.getLogger(__name__)
 MSK = timezone(timedelta(hours=3))
@@ -17,15 +17,19 @@ SEND_HOUR = 9
 
 
 async def build_summary() -> str:
+    """Сводка по кабинету владельца панели — чужие ключи в его бот не попадают."""
     since = utcnow() - timedelta(hours=24)
+    owners = await panel_owner_ids()
     async with session_scope() as db:
+        keys = (await db.execute(select(SelectelKey).where(SelectelKey.owner_id.in_(owners)))).scalars().all()
+        key_ids = [k.id for k in keys] or [-1]
         sums = (await db.execute(select(
             func.coalesce(func.sum(MetricPoint.attempts), 0),
             func.coalesce(func.sum(MetricPoint.busy), 0),
             func.coalesce(func.sum(MetricPoint.errors + MetricPoint.timeouts + MetricPoint.proxy_errors), 0),
-        ).where(MetricPoint.bucket >= since))).one()
-        caught = (await db.execute(select(CaughtIP).where(CaughtIP.caught_at >= since))).scalars().all()
-        keys = (await db.execute(select(SelectelKey))).scalars().all()
+        ).where(MetricPoint.bucket >= since, MetricPoint.key_id.in_(key_ids)))).one()
+        caught = (await db.execute(select(CaughtIP).where(CaughtIP.caught_at >= since,
+                                                          CaughtIP.owner_id.in_(owners)))).scalars().all()
     attempts, busy, errors = (int(v) for v in sums)
     lines = [
         "📊 <b>Сводка за сутки</b>",

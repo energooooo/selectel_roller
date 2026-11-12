@@ -22,7 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.security import new_token, token_hash
-from app.db.models import ExtensionToken, utcnow
+from app.db.models import Admin, ExtensionToken, utcnow
 
 TOKEN_TTL = timedelta(days=90)
 PAIR_TTL = 300  # секунд на то, чтобы ввести код в расширение
@@ -102,6 +102,9 @@ async def current_extension(db: AsyncSession, authorization: str) -> ExtensionTo
     now = utcnow()
     if row is None or row.revoked or row.expires_at <= now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Расширение отключено. Подключите его заново в панели.")
+    owner = await db.get(Admin, row.admin_id)
+    if owner is None or owner.status != "active":
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Пользователь панели заблокирован или ещё не одобрен.")
     if now - row.last_seen_at >= PAIR_TOUCH:
         row.last_seen_at = now
         await db.commit()

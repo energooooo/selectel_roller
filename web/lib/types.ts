@@ -143,6 +143,19 @@ export interface AccountMoney {
     day: number
 }
 
+export interface PanelUser {
+    id: number
+    login: string
+    role: "owner" | "user"
+    status: "pending" | "active" | "rejected" | "blocked"
+    description: string
+    reg_ip: string
+    browser: string
+    created_at: string
+    decided_at: string | null
+    decided_by: string
+}
+
 export type SaleKind = "ip" | "rent" | "vds" | "service" | "other"
 
 export interface Sale {
@@ -229,6 +242,8 @@ export type Settings = Record<string, unknown> & {
     bsboard_url: string
     bsboard_key_set: boolean
     bsboard_recheck_hours: number
+    admin_bot_token_set: boolean
+    admin_tg_ids: string
     pace_governor: boolean
     pace_max: number
     pace_relax_min: number

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bus
+from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.core.crypto import decrypt
 from app.db.models import CaughtIP, Sale, SelectelKey, Vds, utcnow
@@ -37,9 +38,9 @@ def _month_start(dt: datetime) -> datetime:
 
 
 @router.get("/finance/summary")
-async def summary(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    balances = await billing.balances_view()
-    sales = (await db.execute(select(Sale).order_by(Sale.ts))).scalars().all()
+async def summary(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    balances = await billing.balances_view(await scope.visible_account_ids(db, current))
+    sales = (await db.execute(scope.owned(select(Sale).order_by(Sale.ts), Sale, current))).scalars().all()
     now = utcnow()
     this_month = _month_start(now)
     prev_month = _month_start(this_month - timedelta(days=1))
@@ -75,8 +76,10 @@ async def summary(_: Current = Depends(current_admin), db: AsyncSession = Depend
 
 
 @router.post("/finance/balances/refresh")
-async def refresh(_: Current = Depends(current_admin)) -> list[dict]:
-    return await billing.refresh_balances()
+async def refresh(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+    only = await scope.visible_account_ids(db, current)
+    await db.commit()
+    return await billing.refresh_balances(only)
 
 
 # ── журнал доходов ─────────────────────────────────────────────────────────
@@ -102,9 +105,9 @@ class SalePatch(BaseModel):
 
 
 @router.get("/sales")
-async def list_sales(days: int | None = None, caught_id: int | None = None, _: Current = Depends(current_admin),
+async def list_sales(days: int | None = None, caught_id: int | None = None, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> list[dict]:
-    stmt = select(Sale).order_by(Sale.ts.desc(), Sale.id.desc()).limit(2000)
+    stmt = scope.owned(select(Sale).order_by(Sale.ts.desc(), Sale.id.desc()).limit(2000), Sale, current)
     if days:
         stmt = stmt.where(Sale.ts >= utcnow() - timedelta(days=days))
     if caught_id:
@@ -112,19 +115,17 @@ async def list_sales(days: int | None = None, caught_id: int | None = None, _: C
     return [sale_view(s) for s in (await db.execute(stmt)).scalars()]
 
 
-async def _fill_ip(db: AsyncSession, sale: Sale) -> None:
+async def _fill_ip(db: AsyncSession, sale: Sale, current: Current) -> None:
     if sale.caught_id:
-        caught = await db.get(CaughtIP, sale.caught_id)
-        if caught is None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого IP")
+        caught = await scope.get_owned(db, CaughtIP, sale.caught_id, current, "Нет такого IP")
         sale.ip = caught.ip
 
 
 @router.post("/sales")
 async def add_sale(body: SaleIn, current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
     sale = Sale(ts=body.ts or utcnow(), kind=body.kind, amount=round(body.amount, 2), buyer=body.buyer.strip(),
-                caught_id=body.caught_id, ip=body.ip.strip(), note=body.note.strip())
-    await _fill_ip(db, sale)
+                caught_id=body.caught_id, ip=body.ip.strip(), note=body.note.strip(), owner_id=current.admin.id)
+    await _fill_ip(db, sale, current)
     db.add(sale)
     await db.commit()
     await audit(current, "sale.add", sale.ip or sale.buyer, {"amount": sale.amount, "kind": sale.kind})
@@ -135,14 +136,12 @@ async def add_sale(body: SaleIn, current: Current = Depends(current_admin), db: 
 @router.patch("/sales/{sale_id}")
 async def update_sale(sale_id: int, body: SalePatch, current: Current = Depends(current_admin),
                       db: AsyncSession = Depends(get_db)) -> dict:
-    sale = await db.get(Sale, sale_id)
-    if sale is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой записи")
+    sale = await scope.get_owned(db, Sale, sale_id, current, "Нет такой записи")
     changes = body.model_dump(exclude_unset=True)
     for field, value in changes.items():
         setattr(sale, field, value.strip() if isinstance(value, str) else value)
     if "caught_id" in changes:
-        await _fill_ip(db, sale)
+        await _fill_ip(db, sale, current)
     await db.commit()
     await audit(current, "sale.update", str(sale_id), {k: str(v) for k, v in changes.items()})
     bus.publish("money", {})
@@ -151,9 +150,7 @@ async def update_sale(sale_id: int, body: SalePatch, current: Current = Depends(
 
 @router.delete("/sales/{sale_id}")
 async def delete_sale(sale_id: int, current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    sale = await db.get(Sale, sale_id)
-    if sale is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой записи")
+    sale = await scope.get_owned(db, Sale, sale_id, current, "Нет такой записи")
     await db.delete(sale)
     await db.commit()
     await audit(current, "sale.delete", str(sale_id), {"amount": sale.amount})
@@ -162,11 +159,11 @@ async def delete_sale(sale_id: int, current: Current = Depends(current_admin), d
 
 
 @router.get("/sales.csv")
-async def export_sales(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+async def export_sales(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> StreamingResponse:
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";")
     writer.writerow(["дата (МСК)", "что", "сумма, ₽", "кому", "IP", "заметка"])
-    for s in (await db.execute(select(Sale).order_by(Sale.ts.desc()))).scalars():
+    for s in (await db.execute(scope.owned(select(Sale).order_by(Sale.ts.desc()), Sale, current))).scalars():
         writer.writerow([s.ts.astimezone(MSK).strftime("%d.%m.%Y %H:%M"), KIND_LABEL.get(s.kind, s.kind),
                          f"{s.amount:.2f}".replace(".", ","), s.buyer, s.ip, s.note])
     return StreamingResponse(iter(["﻿" + buf.getvalue()]), media_type="text/csv; charset=utf-8",
@@ -183,16 +180,15 @@ def vds_view(v: Vds) -> dict[str, Any]:
 
 
 @router.get("/vds")
-async def list_vds(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
-    rows = (await db.execute(select(Vds).where(Vds.status != "deleted").order_by(Vds.id.desc()))).scalars()
+async def list_vds(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+    rows = (await db.execute(scope.owned(select(Vds).where(Vds.status != "deleted").order_by(Vds.id.desc()),
+                                         Vds, current))).scalars()
     return [vds_view(v) for v in rows]
 
 
 @router.get("/vds/quote")
-async def vds_quote(caught_id: int, _: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    caught = await db.get(CaughtIP, caught_id)
-    if caught is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого IP")
+async def vds_quote(caught_id: int, current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    caught = await scope.get_owned(db, CaughtIP, caught_id, current, "Нет такого IP")
     return await vds_engine.quote(caught.region)
 
 
@@ -208,9 +204,7 @@ class ConfirmIn(BaseModel):
 @router.post("/vds")
 async def create_vds(body: VdsIn, current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
     """Поднять сервер под пойманный IP. Тратит деньги аккаунта — подтверждение вводом адреса."""
-    caught = await db.get(CaughtIP, body.caught_id)
-    if caught is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого IP")
+    caught = await scope.get_owned(db, CaughtIP, body.caught_id, current, "Нет такого IP")
     if body.confirm_ip.strip() != caught.ip:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Адрес для подтверждения не совпал")
     if not caught.on_account or not caught.floating_ip_id:
@@ -221,11 +215,13 @@ async def create_vds(body: VdsIn, current: Current = Depends(current_admin), db:
         raise HTTPException(status.HTTP_409_CONFLICT, "Под этот IP сервер уже есть или создаётся")
     key = await db.get(SelectelKey, caught.key_id) if caught.key_id else None
     if key is None:
-        key = (await db.execute(select(SelectelKey).where(SelectelKey.account_id == caught.account_id))).scalar()
+        key = (await db.execute(select(SelectelKey).where(SelectelKey.account_id == caught.account_id,
+                                                          SelectelKey.owner_id == caught.owner_id))).scalar()
     if key is None:
         raise HTTPException(status.HTTP_409_CONFLICT, "Нет ключа от аккаунта этого IP")
     name = "toffee-" + caught.ip.replace(".", "-")
     v = Vds(caught_id=caught.id, key_id=key.id, account_id=caught.account_id, ip=caught.ip, region=caught.region,
+            owner_id=caught.owner_id,
             name=name, status="creating", step="В очереди", error="")
     db.add(v)
     await db.commit()
@@ -238,9 +234,7 @@ async def create_vds(body: VdsIn, current: Current = Depends(current_admin), db:
 @router.post("/vds/{vds_id}/delete")
 async def delete_vds(vds_id: int, body: ConfirmIn, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> dict:
-    v = await db.get(Vds, vds_id)
-    if v is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого сервера")
+    v = await scope.get_owned(db, Vds, vds_id, current, "Нет такого сервера")
     if body.confirm_ip.strip() != v.ip:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Адрес для подтверждения не совпал")
     if v.status == "creating":
@@ -260,8 +254,8 @@ async def delete_vds(vds_id: int, body: ConfirmIn, current: Current = Depends(cu
 
 @router.post("/vds/{vds_id}/password")
 async def vds_password(vds_id: int, current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    v = await db.get(Vds, vds_id)
-    if v is None or not v.password_enc:
+    v = await scope.get_owned(db, Vds, vds_id, current, "Пароля нет")
+    if not v.password_enc:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Пароля нет")
     await audit(current, "vds.password", v.ip)
     return {"user": "root", "password": decrypt(v.password_enc), "ip": v.ip}

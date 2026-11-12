@@ -20,7 +20,7 @@ from app import bus, settings_store
 from app.db.models import CaughtIP, utcnow
 from app.db.session import session_scope
 from app.events import emit
-from app.notify.telegram import esc, notify
+from app.notify.telegram import esc, notify_for
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ async def check_ip(caught_id: int, *, announce: bool = False) -> str:
         await emit(f"bsboard: {ip} — {'проверку прошёл' if verdict == 'ok' else 'НЕ прошёл проверку'}",
                    level="success" if verdict == "ok" else "warn", kind="check", data={"ip": ip})
         if announce:
-            await notify("caught", f"🧪 bsboard: <code>{esc(ip)}</code> — "
+            await notify_for(caught.owner_id if caught else None, "caught", f"🧪 bsboard: <code>{esc(ip)}</code> — "
                                    + ("✅ прошёл проверку" if verdict == "ok" else "❌ не прошёл проверку"))
     return verdict
 

@@ -7,7 +7,8 @@
   глобальный тормоз при массовом переборе с разных адресов;
 - одинаковый ответ на «нет логина» и «не тот пароль»;
 - сессии в БД, cookie httpOnly + SameSite=Strict (+ Secure на проде), отзыв сессий;
-- первый админ создаётся только с одноразовым setup-токеном из лога сервера;
+- первый админ (владелец панели) создаётся только с одноразовым setup-токеном из лога сервера;
+- остальные регистрируются сами, но входят только после одобрения в админ-боте;
 - уведомления в Telegram о входе с нового адреса и о блокировке.
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import COOKIE_NAME, SESSION_TTL, Current, audit, csrf_guard, current_admin
+from app.auth.scope import owner_only
 from app.auth.security import (
     DUMMY_HASH, client_ip, hash_password, new_backup_codes, new_token, new_totp_secret, password_problem,
     token_hash, totp_uri, verify_password, verify_totp,
@@ -31,12 +33,20 @@ from app.core.config import BACKEND_DIR, get_settings
 from app.core.crypto import decrypt, encrypt
 from app.db.models import Admin, AuditLog, LoginAttempt, Session, utcnow
 from app.db.session import get_db
+from app.notify import admin_bot
 from app.notify.telegram import esc, notify
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 MAX_FAILS = 5
+REG_PER_IP_DAY = 3  # заявок с одного адреса в сутки
+REG_GLOBAL_HOUR = 30  # и всего в час — от массовой регистрации ботами
+STATUS_DENIED = {
+    "pending": "Заявка на рассмотрении. Вход откроется, когда администратор её одобрит.",
+    "rejected": "Заявка отклонена администратором.",
+    "blocked": "Доступ к панели заблокирован администратором.",
+}
 LOCK_WINDOW = timedelta(minutes=15)
 GLOBAL_WINDOW = timedelta(minutes=10)
 GLOBAL_FAILS = 40
@@ -106,6 +116,12 @@ class SetupIn(BaseModel):
     password: str = Field(max_length=256)
 
 
+class RegisterIn(BaseModel):
+    login: str = Field(min_length=3, max_length=32, pattern=r"^[A-Za-z0-9_.-]+$")
+    password: str = Field(max_length=256)
+    description: str = Field(min_length=10, max_length=500)
+
+
 class LoginIn(BaseModel):
     login: str = Field(max_length=64)
     password: str = Field(max_length=256)
@@ -139,7 +155,7 @@ async def state(request: Request, db: AsyncSession = Depends(get_db)) -> dict:
     if token:
         session = (await db.execute(select(Session).where(Session.token_hash == token_hash(token)))).scalar()
         authed = bool(session and not session.revoked and session.expires_at > utcnow())
-    return {"needs_setup": not has_admin, "authenticated": authed}
+    return {"needs_setup": not has_admin, "authenticated": authed, "registration": has_admin}
 
 
 @router.post("/setup")
@@ -153,7 +169,7 @@ async def setup(body: SetupIn, request: Request, response: Response, db: AsyncSe
     problem = password_problem(body.password, body.login)
     if problem:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
-    admin = Admin(login=body.login.strip(), password_hash=hash_password(body.password))
+    admin = Admin(login=body.login.strip(), password_hash=hash_password(body.password), role="owner", status="active")
     db.add(admin)
     await db.commit()
     await ensure_setup_token(db)
@@ -181,6 +197,10 @@ async def login(body: LoginIn, request: Request, response: Response, db: AsyncSe
         if ip_fails + 1 >= MAX_FAILS:
             await notify("login", f"🚫 Перебор пароля: адрес <code>{esc(ip)}</code> заблокирован на 15 минут.")
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Неверный логин или пароль")
+    if admin.status != "active":
+        # Пароль верный — честно говорим, почему не пускаем. Неверный пароль сюда не дойдёт.
+        await _record(db, request, admin.login, False, f"status_{admin.status}")
+        raise HTTPException(status.HTTP_403_FORBIDDEN, STATUS_DENIED.get(admin.status, "Вход закрыт"))
 
     if admin.totp_enabled:
         code = body.code.strip()
@@ -206,6 +226,37 @@ async def login(body: LoginIn, request: Request, response: Response, db: AsyncSe
     return {"ok": True}
 
 
+@router.post("/register")
+async def register(body: RegisterIn, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
+    """Заявка на доступ: пользователь создаётся «ждёт одобрения», заявка уходит в админ-бот."""
+    csrf_guard(request)
+    ip = client_ip(request)
+    now = utcnow()
+    if not (await db.execute(select(func.count(Admin.id)))).scalar_one():
+        raise HTTPException(status.HTTP_409_CONFLICT, "Сначала создайте владельца панели")
+    per_ip = (await db.execute(select(func.count(Admin.id)).where(
+        Admin.reg_ip == ip, Admin.created_at > now - timedelta(days=1)))).scalar_one()
+    recent = (await db.execute(select(func.count(Admin.id)).where(
+        Admin.role != "owner", Admin.created_at > now - timedelta(hours=1)))).scalar_one()
+    if per_ip >= REG_PER_IP_DAY or recent >= REG_GLOBAL_HOUR:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, "Слишком много заявок. Попробуйте завтра.")
+    login_name = body.login.strip()
+    if (await db.execute(select(Admin.id).where(func.lower(Admin.login) == login_name.lower()))).scalar():
+        raise HTTPException(status.HTTP_409_CONFLICT, "Такой логин уже занят")
+    problem = password_problem(body.password, login_name)
+    if problem:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, problem)
+    user = Admin(login=login_name, password_hash=hash_password(body.password), role="user", status="pending",
+                 description=" ".join(body.description.split())[:500], reg_ip=ip,
+                 reg_user_agent=request.headers.get("user-agent", "")[:300])
+    db.add(user)
+    await db.commit()
+    await _record(db, request, login_name, False, "registered")
+    await audit(None, "user.register", login_name, ip=ip)
+    asyncio.get_running_loop().create_task(admin_bot.send_request(user.id))
+    return {"ok": True, "status": "pending"}
+
+
 @router.post("/logout")
 async def logout(response: Response, current: Current = Depends(current_admin),
                  db: AsyncSession = Depends(get_db)) -> dict:
@@ -221,6 +272,7 @@ async def logout(response: Response, current: Current = Depends(current_admin),
 async def me(current: Current = Depends(current_admin)) -> dict:
     return {
         "login": current.admin.login,
+        "role": current.admin.role,
         "totp_enabled": current.admin.totp_enabled,
         "backup_codes_left": len(current.admin.backup_codes or []),
         "password_changed_at": current.admin.password_changed_at,
@@ -310,7 +362,7 @@ async def revoke_session(session_id: int, current: Current = Depends(current_adm
 
 
 @router.get("/attempts")
-async def attempts(limit: int = 100, _: Current = Depends(current_admin),
+async def attempts(limit: int = 100, _: Current = Depends(owner_only),
                    db: AsyncSession = Depends(get_db)) -> list[dict]:
     rows = (await db.execute(select(LoginAttempt).order_by(LoginAttempt.ts.desc()).limit(min(limit, 500)))).scalars()
     return [{"id": a.id, "ts": a.ts, "ip": a.ip, "login": a.login, "ok": a.ok, "reason": a.reason,
@@ -318,8 +370,11 @@ async def attempts(limit: int = 100, _: Current = Depends(current_admin),
 
 
 @router.get("/audit")
-async def audit_log(limit: int = 200, _: Current = Depends(current_admin),
+async def audit_log(limit: int = 200, current: Current = Depends(owner_only),
                     db: AsyncSession = Depends(get_db)) -> list[dict]:
-    rows = (await db.execute(select(AuditLog).order_by(AuditLog.ts.desc()).limit(min(limit, 1000)))).scalars()
+    # Свои действия и события по пользователям; чужие ключи и аккаунты сюда не попадают.
+    rows = (await db.execute(select(AuditLog).where(
+        (AuditLog.admin_id == current.admin.id) | AuditLog.action.like("user.%")
+    ).order_by(AuditLog.ts.desc()).limit(min(limit, 1000)))).scalars()
     return [{"id": a.id, "ts": a.ts, "ip": a.ip, "action": a.action, "target": a.target, "details": a.details}
             for a in rows]

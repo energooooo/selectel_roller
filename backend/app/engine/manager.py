@@ -21,7 +21,7 @@ from app.engine.proxy import check_proxy, choose_random_proxy, with_session
 from app.engine.selectel import SelectelClient
 from app.engine.worker import KeyWorker, resolve_project
 from app.events import emit
-from app.notify.telegram import notify
+from app.notify.telegram import notify, panel_owner_ids
 
 log = logging.getLogger(__name__)
 # Статусы, после которых ключ сам не перезапускается — нужен человек.
@@ -192,8 +192,9 @@ class WorkerManager:
             if key is None or key.proxy_mode == "none":
                 return None
             if key.proxy_mode == "fixed":
-                return await db.get(Proxy, key.proxy_id) if key.proxy_id else None
-            proxies = (await db.execute(select(Proxy))).scalars().all()
+                proxy = await db.get(Proxy, key.proxy_id) if key.proxy_id else None
+                return proxy if proxy is not None and proxy.owner_id == key.owner_id else None
+            proxies = (await db.execute(select(Proxy).where(Proxy.owner_id == key.owner_id))).scalars().all()
             chosen = choose_random_proxy(proxies, key.proxy_id)
             key.proxy_id = chosen.id if chosen else None
             return chosen
@@ -219,9 +220,9 @@ class WorkerManager:
             data = {"id": proxy.id, "status": proxy.status, "exit_ip": proxy.exit_ip,
                     "exit_country": proxy.exit_country, "latency_ms": proxy.latency_ms,
                     "regions_ok": proxy.regions_ok, "regions_failed": proxy.regions_failed,
-                    "last_error": proxy.last_error, "checked_at": proxy.checked_at}
+                    "last_error": proxy.last_error, "checked_at": proxy.checked_at, "owner_id": proxy.owner_id}
         bus.publish("proxy", data)
-        if was in ("ok", "partial") and result.status == "dead":
+        if was in ("ok", "partial") and result.status == "dead" and data.get("owner_id") in await panel_owner_ids():
             await emit(f"прокси {proxy.label or proxy.display} перестал работать: {result.error}", level="warn", kind="proxy")
         return data
 
@@ -234,7 +235,8 @@ class WorkerManager:
                 for proxy_id in ids:
                     await self.check_proxy(proxy_id)
                 async with session_scope() as db:
-                    proxies = (await db.execute(select(Proxy))).scalars().all()
+                    proxies = (await db.execute(select(Proxy).where(
+                        Proxy.owner_id.in_(await panel_owner_ids())))).scalars().all()
                 if proxies and all(p.status == "dead" for p in proxies):
                     await notify("alert", "🧯 Ни один прокси не работает — ключи с автовыбором прокси не смогут искать IP.")
             except Exception:  # noqa: BLE001

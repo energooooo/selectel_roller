@@ -45,7 +45,8 @@ async def current_admin(request: Request, db: AsyncSession = Depends(get_db)) ->
     if session is None or session.revoked or session.expires_at <= now:
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Сессия истекла — войдите заново")
     admin = await db.get(Admin, session.admin_id)
-    if admin is None:
+    if admin is None or admin.status != "active":
+        # Заблокированный или ещё не одобренный пользователь не работает даже со старой сессией.
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Нужно войти")
     ip = client_ip(request)
     if now - session.last_seen_at >= TOUCH_EVERY:

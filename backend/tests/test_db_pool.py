@@ -27,9 +27,9 @@ def test_live_requests_release_connection_before_waiting(path, tmp_path, monkeyp
         token = "test-session"
         async with make_session.begin() as db:
             db.add_all([
-                Admin(id=1, login="tester", password_hash="unused"),
+                Admin(id=1, login="tester", password_hash="unused", role="owner", status="active"),
                 Session(admin_id=1, token_hash=token_hash(token), expires_at=utcnow() + timedelta(hours=1)),
-                SelectelKey(id=1, name="Test key", account_id="123456", enabled=False),
+                SelectelKey(id=1, name="Test key", account_id="123456", enabled=False, owner_id=1),
             ])
 
         async def request_db():

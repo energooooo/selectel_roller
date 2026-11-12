@@ -35,7 +35,7 @@ from app.engine.proxy import with_session
 from app.engine.resell import SelectelResellClient
 from app.engine.selectel import SelectelClient
 from app.events import emit
-from app.notify.telegram import esc, notify
+from app.notify.telegram import esc, notify_for
 
 if TYPE_CHECKING:
     from app.engine.manager import WorkerManager
@@ -189,6 +189,7 @@ class KeyWorker:
         self.targets_dirty = False
         self.client: SelectelClient | None = None
         self.key_name = f"#{key_id}"
+        self.owner_id: int | None = None  # кабинет ключа: подсети и прокси берутся только из него
         self.account_id = ""
         self._proxy_base: str | None = None
         self._proxy_mode = "none"
@@ -236,7 +237,7 @@ class KeyWorker:
             level = "success" if stop.status == "done" else "error"
             await self.log(stop.reason, level=level, kind="stop")
             if stop.alert and stop.status != "done":
-                await notify("alert", f"⛔ <b>{esc(self.key_name)}</b> ({esc(self.account_id)}): {esc(stop.reason)}")
+                await notify_for(self.owner_id, "alert", f"⛔ <b>{esc(self.key_name)}</b> ({esc(self.account_id)}): {esc(stop.reason)}")
         except asyncio.CancelledError:
             self.runtime.state = "paused"
             self._publish()
@@ -253,6 +254,7 @@ class KeyWorker:
                 raise StopHunt("error", "ключ удалён", alert=False)
             self.key_name = key.name
             self.account_id = key.account_id
+            self.owner_id = key.owner_id
             self._session_gen = key.proxy_session_gen or 0
             self.governor = PaceGovernor(key.pace or 1.0, key.pace_reason or "")
             self.runtime.pace, self.runtime.pace_reason = self.governor.pace, self.governor.reason
@@ -433,7 +435,8 @@ class KeyWorker:
         exact_only = bool(settings_store.get("exact_only"))
         available = set(self.client.available_regions()) if self.client else set()
         async with session_scope() as db:
-            subnets = (await db.execute(select(Subnet).where(Subnet.enabled.is_(True)))).scalars().all()
+            subnets = (await db.execute(select(Subnet).where(
+                Subnet.enabled.is_(True), Subnet.owner_id == self.owner_id))).scalars().all()
             pools = (await db.execute(select(RegionPool))).scalars().all()
             old = {(t.region, t.os_subnet_id, t.subnet_id): t for t in self.targets}
             targets: list[Target] = []
@@ -600,7 +603,7 @@ class KeyWorker:
                         if other.region == target.region:
                             other.disabled = f"квота floating IP в {target.region} исчерпана"
                     await self.log(f"{target.region}: закончился лимит IP на аккаунте ({exc}), регион пропускается", "warn", target.region)
-                    await notify("alert", f"⚠️ <b>{esc(self.key_name)}</b>: квота floating IP в "
+                    await notify_for(self.owner_id, "alert", f"⚠️ <b>{esc(self.key_name)}</b>: квота floating IP в "
                                           f"{esc(target.region)} исчерпана, регион пропускается")
                     continue
                 except RegionUnreachable as exc:
@@ -612,7 +615,7 @@ class KeyWorker:
                         note = await self._rotate_proxy()
                         await self.log(f"прокси перестал отвечать во всех регионах ({exc}), переключаюсь на другой внешний IP ({note})", "warn",
                                        kind="rotation")
-                        await notify("rotation", f"🔁 <b>{esc(self.key_name)}</b>: прокси-сессия умерла, "
+                        await notify_for(self.owner_id, "rotation", f"🔁 <b>{esc(self.key_name)}</b>: прокси-сессия умерла, "
                                                  f"сменил на {esc(note)}")
                         transport_streak, streak_regions = 0, set()
                         region_fails.clear(), region_backoff.clear(), region_pause.clear()
@@ -629,7 +632,7 @@ class KeyWorker:
                         await self.log(f"{target.region}: Selectel не отвечает ({exc}), "
                                        f"регион на паузе {int(backoff)} с", "warn", target.region)
                         if first:
-                            await notify("alert", f"⚠️ <b>{esc(self.key_name)}</b>: API {esc(target.region)} не "
+                            await notify_for(self.owner_id, "alert", f"⚠️ <b>{esc(self.key_name)}</b>: API {esc(target.region)} не "
                                                   f"отвечает ({esc(exc)}). Регион на паузе, остальные ловят.")
                     if self.consecutive_errors >= max_errors() > 0:
                         raise StopHunt("error", f"{self.consecutive_errors} ошибок подряд — ключ остановлен. Подробности в журнале.",
@@ -773,6 +776,7 @@ class KeyWorker:
         async with session_scope() as db:
             key = await db.get(SelectelKey, self.key_id)
             caught = CaughtIP(ip=address, region=target.region, key_id=self.key_id, account_id=self.account_id,
+                              owner_id=key.owner_id if key else self.owner_id,
                               subnet_id=target.subnet_id, pool_cidr=target.pool_cidr,
                               floating_ip_id=floating_ip_id, attempts_spent=key.attempts_total if key else None,
                               protected=True, on_account=True)
@@ -789,7 +793,7 @@ class KeyWorker:
                        kind="caught", ip=address, caught_id=caught_id)
         bus.publish("caught", {"id": caught_id, "ip": address, "region": target.region, "key_id": self.key_id,
                                "key_name": self.key_name})
-        await notify("caught", f"🎯 Найден IP <code>{esc(address)}</code>\n"
+        await notify_for(self.owner_id, "caught", f"🎯 Найден IP <code>{esc(address)}</code>\n"
                                f"Ключ: <b>{esc(self.key_name)}</b> ({esc(self.account_id)})\n"
                                f"Регион: {esc(target.region)}, подсеть {esc(target.pool_cidr)}\n"
                                f"Запросов с запуска: {self.runtime.attempts_run}", admin_copy=True)

@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bus
+from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.db.models import RegionPool, Subnet
 from app.db.session import get_db
@@ -38,9 +39,9 @@ def subnet_view(s: Subnet, offered: bool, heat: Heat | None = None) -> dict[str,
 
 
 @router.get("")
-async def list_subnets(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def list_subnets(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
     pools = await _pools(db)
-    subnets = (await db.execute(select(Subnet))).scalars().all()
+    subnets = (await db.execute(scope.owned(select(Subnet), Subnet, current))).scalars().all()
     scores = await subnet_scores(db)
     views = []
     for s in subnets:
@@ -75,7 +76,8 @@ async def add_subnets(body: SubnetsIn, current: Current = Depends(current_admin)
             continue
         white = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
         region = next((r for r, p in pools if net.overlaps(p)), "")
-        existing = (await db.execute(select(Subnet).where(Subnet.cidr == str(net)))).scalar()
+        existing = (await db.execute(select(Subnet).where(Subnet.cidr == str(net),
+                                                          Subnet.owner_id == current.admin.id))).scalar()
         if existing:
             existing.enabled = True
             if white is not None:
@@ -83,7 +85,7 @@ async def add_subnets(body: SubnetsIn, current: Current = Depends(current_admin)
             existing.region = existing.region or region
             updated += 1
         else:
-            db.add(Subnet(cidr=str(net), white_count=white, region=region, enabled=True, source="manual",
+            db.add(Subnet(cidr=str(net), white_count=white, region=region, enabled=True, source="manual", owner_id=current.admin.id,
                           note="" if region else "в кэше пулов Selectel не найдена — проверится при охоте"))
             added += 1
     await db.commit()
@@ -103,9 +105,7 @@ class SubnetPatch(BaseModel):
 @router.patch("/{subnet_id}")
 async def update_subnet(subnet_id: int, body: SubnetPatch, current: Current = Depends(current_admin),
                         db: AsyncSession = Depends(get_db)) -> dict:
-    subnet = await db.get(Subnet, subnet_id)
-    if subnet is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой подсети")
+    subnet = await scope.get_owned(db, Subnet, subnet_id, current, "Нет такой подсети")
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(subnet, field, value)
     await db.commit()
@@ -123,7 +123,7 @@ class BulkToggle(BaseModel):
 @router.post("/toggle")
 async def toggle_subnets(body: BulkToggle, current: Current = Depends(current_admin),
                          db: AsyncSession = Depends(get_db)) -> dict:
-    for subnet in (await db.execute(select(Subnet).where(Subnet.id.in_(body.ids)))).scalars():
+    for subnet in (await db.execute(scope.owned(select(Subnet).where(Subnet.id.in_(body.ids)), Subnet, current))).scalars():
         subnet.enabled = body.enabled
     await db.commit()
     await audit(current, "subnet.toggle", f"{len(body.ids)} шт.", {"enabled": body.enabled})
@@ -135,9 +135,7 @@ async def toggle_subnets(body: BulkToggle, current: Current = Depends(current_ad
 @router.delete("/{subnet_id}")
 async def delete_subnet(subnet_id: int, current: Current = Depends(current_admin),
                         db: AsyncSession = Depends(get_db)) -> dict:
-    subnet = await db.get(Subnet, subnet_id)
-    if subnet is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой подсети")
+    subnet = await scope.get_owned(db, Subnet, subnet_id, current, "Нет такой подсети")
     cidr = subnet.cidr
     await db.delete(subnet)
     await db.commit()

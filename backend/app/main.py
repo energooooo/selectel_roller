@@ -8,7 +8,7 @@ from fastapi import FastAPI
 from starlette.datastructures import MutableHeaders
 
 from app import __version__, browser_onboarding, settings_store
-from app.api import data, extension, finance, keys, proxies, subnets
+from app.api import data, extension, finance, keys, proxies, subnets, users
 from app.api.health import router as health_router
 from app.auth.routes import ensure_setup_token, router as auth_router
 from app.checks import bsboard
@@ -18,6 +18,7 @@ from app.db.migrate import upgrade_db
 from app.db.session import SessionLocal
 from app.engine.billing import money_loop
 from app.engine.manager import manager
+from app.notify import admin_bot
 from app.notify.daily import daily_loop
 
 
@@ -31,7 +32,7 @@ async def lifespan(_app: FastAPI):
     manager.add_caught_hook(bsboard.on_caught)
     await manager.start()
     background = [asyncio.create_task(bsboard.rechecker()), asyncio.create_task(daily_loop()),
-                  asyncio.create_task(money_loop())]
+                  asyncio.create_task(money_loop()), asyncio.create_task(admin_bot.poller())]
     try:
         yield
     finally:
@@ -59,7 +60,7 @@ def create_app() -> FastAPI:
     )
     app.include_router(health_router, prefix="/api")
     app.include_router(auth_router, prefix="/api")
-    for module in (keys, proxies, subnets, data, finance):
+    for module in (keys, proxies, subnets, data, finance, users):
         app.include_router(module.router, prefix="/api")
     app.include_router(extension.router, prefix="/api")
     app.include_router(extension.accounts_router, prefix="/api")

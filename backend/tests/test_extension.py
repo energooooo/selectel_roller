@@ -25,7 +25,7 @@ def sessionmaker():
 def _add_admin(sessionmaker) -> int:
     async def run():
         async with sessionmaker() as db:
-            admin = Admin(login="root", password_hash="x")
+            admin = Admin(login="root", password_hash="x", role="owner", status="active")
             db.add(admin)
             await db.commit()
             return admin.id

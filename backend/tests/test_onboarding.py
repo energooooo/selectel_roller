@@ -128,7 +128,12 @@ def test_onboard_route_requires_admin_and_accepts_iam_token_in_header(monkeypatc
     assert client.post(path, json=payload).status_code == 403
     assert client.post(path, json=payload, headers=headers).status_code == 401
 
-    app.dependency_overrides[keys.current_admin] = lambda: object()
+    app.dependency_overrides[keys.current_admin] = lambda: SimpleNamespace(admin=SimpleNamespace(id=1, role="owner"))
+
+    async def mine(db, model, obj_id, current, missing=""):  # прокси из кабинета пользователя — проверка владельца
+        return SimpleNamespace(id=obj_id, owner_id=1)
+
+    monkeypatch.setattr(keys.scope, "get_owned", mine)
     missing_token = client.post(path, json=payload)
     assert missing_token.status_code == 422
     assert "IAM-токен" in missing_token.json()["detail"]
@@ -136,7 +141,7 @@ def test_onboard_route_requires_admin_and_accepts_iam_token_in_header(monkeypatc
     assert invalid_proxy.status_code == 422
     assert token not in invalid_proxy.text
 
-    async def mock_empty_balance(*_):
+    async def mock_empty_balance(*_, **__):
         raise onboarding.OnboardingPaymentRequired("Пополните баланс")
 
     monkeypatch.setattr(keys, "onboard_account", mock_empty_balance)
@@ -144,8 +149,8 @@ def test_onboard_route_requires_admin_and_accepts_iam_token_in_header(monkeypatc
     assert empty_balance.status_code == 402
     assert empty_balance.json() == {"detail": "Пополните баланс"}
 
-    async def mock_onboard(account_id, proxy_id, project_name, iam_token):
-        assert (account_id, proxy_id, project_name, iam_token) == ("123456", 1, "", token)
+    async def mock_onboard(account_id, proxy_id, project_name, iam_token, owner_id=None):
+        assert (account_id, proxy_id, project_name, iam_token, owner_id) == ("123456", 1, "", token, 1)
         return SimpleNamespace(name="toffee-roller-123456", account_id=account_id, project_name="demo"), True
 
     async def mock_view(db, key):

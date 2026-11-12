@@ -63,6 +63,38 @@ async def notify(kind: str, text: str, *, admin_copy: bool = False) -> bool:
     return ok
 
 
+_owner_ids: set[int] = set()
+_owner_ids_at = 0.0
+
+
+async def panel_owner_ids() -> set[int]:
+    """id владельцев панели (role=owner); кэш на минуту."""
+    global _owner_ids_at
+    import time  # noqa: PLC0415
+
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from app.db.models import Admin  # noqa: PLC0415
+    from app.db.session import session_scope  # noqa: PLC0415
+
+    if time.monotonic() - _owner_ids_at > 60:
+        async with session_scope() as db:
+            ids = set((await db.execute(select(Admin.id).where(Admin.role == "owner"))).scalars())
+        _owner_ids.clear()
+        _owner_ids.update(ids)
+        _owner_ids_at = time.monotonic()
+    return _owner_ids
+
+
+async def notify_for(owner_id: int | None, kind: str, text: str, *, admin_copy: bool = False) -> bool:
+    """Уведомление о записи кабинета: в бот панели — только если это кабинет владельца панели.
+    Пользователи получат свои уведомления через основного бота (позже); чужие IP и балансы
+    владельцу не уходят."""
+    if owner_id is None or owner_id not in await panel_owner_ids():
+        return False
+    return await notify(kind, text, admin_copy=admin_copy)
+
+
 async def send_test(token: str, chat_id: str) -> tuple[bool, str]:
     return await _send(token, chat_id, "🍬 <b>Toffee Roller</b>\nТестовое сообщение: уведомления работают.")
 

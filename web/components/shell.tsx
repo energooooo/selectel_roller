@@ -7,7 +7,7 @@ import {Command} from "cmdk"
 import * as DialogPrimitive from "@radix-ui/react-dialog"
 import {
     ChartLineUp, ClockCounterClockwise, Coins, Crosshair, GearSix, Globe, Key, ListBullets, MagnifyingGlass,
-    ShieldCheck, SignOut, SquaresFour, Storefront, TreeStructure, X, House,
+    ShieldCheck, SignOut, SquaresFour, Storefront, TreeStructure, UsersThree, X, House,
 } from "@phosphor-icons/react"
 import {Toaster} from "sonner"
 import {TOAST_ICONS} from "@/components/toast-icons"
@@ -17,7 +17,7 @@ import {Kbd, TooltipProvider} from "@/components/ui/primitives"
 import {api, post, useApi} from "@/lib/api"
 import {plural} from "@/lib/format"
 import {StreamProvider, useStream} from "@/lib/stream"
-import type {Overview} from "@/lib/types"
+import type {Overview, PanelUser} from "@/lib/types"
 import {cn} from "@/lib/utils"
 
 interface NavItem {
@@ -25,6 +25,7 @@ interface NavItem {
     label: string
     icon: React.ComponentType<{ className?: string; weight?: "fill" | "regular" }>
     about: string
+    owner?: boolean  // только владельцу панели
 }
 
 export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
@@ -50,7 +51,8 @@ export const NAV_GROUPS: { title: string; items: NavItem[] }[] = [
         title: "Система",
         items: [
             {href: "/journal", label: "Журнал", icon: ListBullets, about: "Каждое действие поиска по времени"},
-            {href: "/settings", label: "Настройки", icon: GearSix, about: "Паузы, регионы, уведомления"},
+            {href: "/users", label: "Пользователи", icon: UsersThree, about: "Заявки на доступ и блокировки", owner: true},
+            {href: "/settings", label: "Настройки", icon: GearSix, about: "Паузы, регионы, уведомления", owner: true},
             {href: "/security", label: "Безопасность", icon: ShieldCheck, about: "Пароль, 2FA, сессии"},
         ],
     },
@@ -63,6 +65,16 @@ export const NAV: NavItem[] = [
 
 // На телефоне внизу — главное; остальное в «Ещё».
 const MOBILE = ["/", "/keys", "/ips", "/metrics"]
+
+/** Роль текущего пользователя: владелец панели видит заявки и общие настройки. */
+export function useIsOwner(): boolean {
+    const {data} = useApi<{ role: string }>("/auth/me", {revalidateOnFocus: false})
+    return data?.role === "owner"
+}
+
+function visibleGroups(owner: boolean) {
+    return NAV_GROUPS.map((g) => ({...g, items: g.items.filter((i) => owner || !i.owner)}))
+}
 
 function isActive(pathname: string, href: string) {
     return href === "/" ? pathname === "/" : pathname.startsWith(href)
@@ -103,6 +115,7 @@ function CommandPalette({open, setOpen}: { open: boolean; setOpen: (v: boolean) 
         window.addEventListener("keydown", onKey)
         return () => window.removeEventListener("keydown", onKey)
     }, [open, setOpen])
+    const owner = useIsOwner()
     const go = (href: string) => {
         setOpen(false)
         router.push(href)
@@ -137,7 +150,7 @@ function CommandPalette({open, setOpen}: { open: boolean; setOpen: (v: boolean) 
                         </Command.Item>
                     ))}
                 </Command.Group>
-                {NAV_GROUPS.map((group) => (
+                {visibleGroups(owner).map((group) => (
                     <Command.Group key={group.title} heading={group.title} className={groupCls}>
                         {group.items.map((item) => (
                             <Command.Item key={item.href} value={`${item.label} ${item.about}`} onSelect={() => go(item.href)} className={itemCls}>
@@ -178,9 +191,12 @@ async function logout(router: ReturnType<typeof useRouter>) {
 
 function NavLinks({onNavigate}: { onNavigate?: () => void }) {
     const pathname = usePathname()
+    const owner = useIsOwner()
+    const {data: users} = useApi<PanelUser[]>(owner ? "/users" : null, {refreshInterval: 60_000})
+    const pending = users?.filter((u) => u.status === "pending").length ?? 0
     return (
         <nav aria-label="Разделы" className="flex flex-col gap-5">
-            {NAV_GROUPS.map((group) => (
+            {visibleGroups(owner).map((group) => (
                 <div key={group.title}>
                     <p className="mb-1.5 px-3 text-[12.5px] font-medium text-subtle">{group.title}</p>
                     <div className="flex flex-col gap-0.5">
@@ -196,6 +212,10 @@ function NavLinks({onNavigate}: { onNavigate?: () => void }) {
                                     <item.icon className={cn("size-[19px]", active ? "text-foreground" : "text-subtle group-hover:text-muted-foreground")}
                                                weight={active ? "fill" : "regular"}/>
                                     {item.label}
+                                    {item.href === "/users" && pending > 0 && (
+                                        <span className="ml-auto rounded-full bg-amber/15 px-2 py-0.5 font-mono text-[12px] font-medium text-amber"
+                                              aria-label={`Ждут решения: ${pending}`}>{pending}</span>
+                                    )}
                                 </Link>
                             )
                         })}

@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bus
+from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.core.crypto import encrypt
 from app.db.models import Proxy, SelectelKey
@@ -29,9 +30,9 @@ def proxy_view(p: Proxy, keys: int = 0) -> dict[str, Any]:
 
 
 @router.get("")
-async def list_proxies(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def list_proxies(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
     load = Counter(k.proxy_id for k in (await db.execute(select(SelectelKey))).scalars() if k.proxy_id)
-    proxies = (await db.execute(select(Proxy).order_by(Proxy.id))).scalars().all()
+    proxies = (await db.execute(scope.owned(select(Proxy).order_by(Proxy.id), Proxy, current))).scalars().all()
     return [proxy_view(p, load.get(p.id, 0)) for p in proxies]
 
 
@@ -56,13 +57,14 @@ async def add_proxies(body: ProxiesIn, current: Current = Depends(current_admin)
         except ProxyParseError as exc:
             errors.append({"line": n, "error": str(exc)})
             continue
-        exists = (await db.execute(select(Proxy.id).where(Proxy.fingerprint == parsed.fingerprint))).scalar()
+        exists = (await db.execute(select(Proxy.id).where(Proxy.fingerprint == parsed.fingerprint,
+                                                          Proxy.owner_id == current.admin.id))).scalar()
         if exists or parsed.fingerprint in seen:
             duplicates += 1
             continue
         seen.add(parsed.fingerprint)
         proxy = Proxy(url_enc=encrypt(parsed.url), fingerprint=parsed.fingerprint, display=parsed.display,
-                      label=parsed.label, kind=parsed.kind, session_mode=body.session_mode)
+                      label=parsed.label, kind=parsed.kind, session_mode=body.session_mode, owner_id=current.admin.id)
         db.add(proxy)
         added.append(proxy)
     await db.commit()
@@ -84,9 +86,7 @@ class ProxyPatch(BaseModel):
 @router.patch("/{proxy_id}")
 async def update_proxy(proxy_id: int, body: ProxyPatch, current: Current = Depends(current_admin),
                        db: AsyncSession = Depends(get_db)) -> dict:
-    proxy = await db.get(Proxy, proxy_id)
-    if proxy is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого прокси")
+    proxy = await scope.get_owned(db, Proxy, proxy_id, current, "Нет такого прокси")
     if body.label is not None:
         proxy.label = body.label.strip()
     if body.session_mode is not None:
@@ -99,7 +99,10 @@ async def update_proxy(proxy_id: int, body: ProxyPatch, current: Current = Depen
 
 
 @router.post("/{proxy_id}/check")
-async def check_one(proxy_id: int, _: Current = Depends(current_admin)) -> dict:
+async def check_one(proxy_id: int, current: Current = Depends(current_admin),
+                    db: AsyncSession = Depends(get_db)) -> dict:
+    await scope.get_owned(db, Proxy, proxy_id, current, "Нет такого прокси")
+    await db.commit()
     data = await manager.check_proxy(proxy_id)
     if not data:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого прокси")
@@ -107,8 +110,8 @@ async def check_one(proxy_id: int, _: Current = Depends(current_admin)) -> dict:
 
 
 @router.post("/check-all")
-async def check_all(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    ids = list((await db.execute(select(Proxy.id))).scalars())
+async def check_all(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    ids = list((await db.execute(scope.owned(select(Proxy.id), Proxy, current))).scalars())
 
     async def run() -> None:
         sem = asyncio.Semaphore(6)
@@ -126,9 +129,7 @@ async def check_all(_: Current = Depends(current_admin), db: AsyncSession = Depe
 @router.delete("/{proxy_id}")
 async def delete_proxy(proxy_id: int, current: Current = Depends(current_admin),
                        db: AsyncSession = Depends(get_db)) -> dict:
-    proxy = await db.get(Proxy, proxy_id)
-    if proxy is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого прокси")
+    proxy = await scope.get_owned(db, Proxy, proxy_id, current, "Нет такого прокси")
     affected = [k.id for k in (await db.execute(select(SelectelKey).where(
         SelectelKey.proxy_id == proxy_id, SelectelKey.enabled.is_(True)))).scalars()]
     display = proxy.display

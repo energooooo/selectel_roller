@@ -42,15 +42,15 @@ def test_pause_keys_scopes_and_preserves_held_ips(monkeypatch):
         token = "test-session"
         async with make_session.begin() as db:
             db.add_all([
-                Admin(id=1, login="tester", password_hash="unused"),
+                Admin(id=1, login="tester", password_hash="unused", role="owner", status="active"),
                 Session(admin_id=1, token_hash=token_hash(token), expires_at=utcnow() + timedelta(hours=1)),
-                Proxy(id=1, display="proxy:1080", label="Test proxy", url_enc="unused", fingerprint="test-proxy"),
-                SelectelKey(id=1, name="One", account_id="111", status="hunting", proxy_id=1),
-                SelectelKey(id=2, name="Two", account_id="222", status="starting"),
-                SelectelKey(id=3, name="Three", account_id="333", status="auth_failed"),
-                SelectelKey(id=4, name="Four", account_id="444", status="error"),
-                CaughtIP(ip="192.0.2.10", region="ru-1", key_id=1),
-                CaughtIP(ip="192.0.2.11", region="ru-1", key_id=1, on_account=False),
+                Proxy(id=1, display="proxy:1080", label="Test proxy", url_enc="unused", fingerprint="test-proxy", owner_id=1),
+                SelectelKey(id=1, name="One", account_id="111", status="hunting", proxy_id=1, owner_id=1),
+                SelectelKey(id=2, name="Two", account_id="222", status="starting", owner_id=1),
+                SelectelKey(id=3, name="Three", account_id="333", status="auth_failed", owner_id=1),
+                SelectelKey(id=4, name="Four", account_id="444", status="error", owner_id=1),
+                CaughtIP(ip="192.0.2.10", region="ru-1", key_id=1, owner_id=1),
+                CaughtIP(ip="192.0.2.11", region="ru-1", key_id=1, on_account=False, owner_id=1),
             ])
 
         first, second, retrying = (asyncio.create_task(asyncio.sleep(60)) for _ in range(3))

@@ -15,12 +15,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import bus, metrics, settings_store
+from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.checks import bsboard
 from app.db.models import CaughtIP, Event, MetricPoint, Proxy, Sale, SelectelKey, Subnet, Vds, utcnow
 from app.db.session import get_db
 from app.engine.manager import manager
 from app.notify import telegram
+from app.stream_filter import StreamFilter
 
 router = APIRouter(tags=["data"])
 MSK = timezone(timedelta(hours=3))
@@ -38,8 +40,10 @@ def caught_view(c: CaughtIP, key_name: str | None) -> dict[str, Any]:
 
 
 async def _caught_query(db: AsyncSession, key_id: int | None, region: str | None, on_account: bool | None,
-                        q: str | None, days: int | None) -> list[dict[str, Any]]:
+                        q: str | None, days: int | None, current: Current | None = None) -> list[dict[str, Any]]:
     stmt = select(CaughtIP).order_by(CaughtIP.caught_at.desc())
+    if current is not None:
+        stmt = scope.owned(stmt, CaughtIP, current)
     if key_id:
         stmt = stmt.where(CaughtIP.key_id == key_id)
     if region:
@@ -68,14 +72,14 @@ async def _caught_query(db: AsyncSession, key_id: int | None, region: str | None
 
 @router.get("/caught")
 async def list_caught(key_id: int | None = None, region: str | None = None, on_account: bool | None = None,
-                      q: str | None = None, days: int | None = None, _: Current = Depends(current_admin),
+                      q: str | None = None, days: int | None = None, current: Current = Depends(current_admin),
                       db: AsyncSession = Depends(get_db)) -> list[dict]:
-    return await _caught_query(db, key_id, region, on_account, q, days)
+    return await _caught_query(db, key_id, region, on_account, q, days, current)
 
 
 @router.get("/caught.csv")
-async def export_caught(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> StreamingResponse:
-    rows = await _caught_query(db, None, None, None, None, None)
+async def export_caught(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> StreamingResponse:
+    rows = await _caught_query(db, None, None, None, None, None, current)
     buf = io.StringIO()
     writer = csv.writer(buf, delimiter=";")
     writer.writerow(["ip", "регион", "ключ", "аккаунт", "подсеть", "пойман (МСК)", "на аккаунте", "защита",
@@ -100,9 +104,7 @@ class CaughtPatch(BaseModel):
 @router.patch("/caught/{caught_id}")
 async def update_caught(caught_id: int, body: CaughtPatch, current: Current = Depends(current_admin),
                         db: AsyncSession = Depends(get_db)) -> dict:
-    caught = await db.get(CaughtIP, caught_id)
-    if caught is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такой записи")
+    caught = await scope.get_owned(db, CaughtIP, caught_id, current, "Нет такой записи")
     changes = body.model_dump(exclude_unset=True)
     for field, value in changes.items():
         if field == "protected" and value is None:
@@ -121,7 +123,10 @@ async def update_caught(caught_id: int, body: CaughtPatch, current: Current = De
 
 
 @router.post("/caught/{caught_id}/check")
-async def recheck_caught(caught_id: int, _: Current = Depends(current_admin)) -> dict:
+async def recheck_caught(caught_id: int, current: Current = Depends(current_admin),
+                         db: AsyncSession = Depends(get_db)) -> dict:
+    await scope.get_owned(db, CaughtIP, caught_id, current, "Нет такой записи")
+    await db.commit()
     return {"check_status": await bsboard.check_ip(caught_id)}
 
 
@@ -130,8 +135,13 @@ async def recheck_caught(caught_id: int, _: Current = Depends(current_admin)) ->
 @router.get("/events")
 async def list_events(level: str | None = None, key_id: int | None = None, kind: str | None = None,
                       before_id: int | None = None, limit: int = Query(100, le=500),
-                      _: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+                      current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
     stmt = select(Event).order_by(Event.id.desc()).limit(limit)
+    mine = await scope.visible_key_ids(db, current)
+    if scope.is_owner(current):  # события без ключа — системные (сбой, прокси), их видит владелец панели
+        stmt = stmt.where(Event.key_id.in_(mine) | Event.key_id.is_(None))
+    else:
+        stmt = stmt.where(Event.key_id.in_(mine or {-1}))
     if level:
         stmt = stmt.where(Event.level.in_(level.split(",")))
     if key_id:
@@ -147,18 +157,20 @@ async def list_events(level: str | None = None, key_id: int | None = None, kind:
 # ── Обзор ──────────────────────────────────────────────────────────────────
 
 @router.get("/overview")
-async def overview(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
-    keys = (await db.execute(select(SelectelKey))).scalars().all()
-    proxies = (await db.execute(select(Proxy))).scalars().all()
-    subnets = (await db.execute(select(Subnet))).scalars().all()
+async def overview(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> dict:
+    keys = (await db.execute(scope.owned(select(SelectelKey), SelectelKey, current))).scalars().all()
+    proxies = (await db.execute(scope.owned(select(Proxy), Proxy, current))).scalars().all()
+    subnets = (await db.execute(scope.owned(select(Subnet), Subnet, current))).scalars().all()
     today = datetime.now(MSK).replace(hour=0, minute=0, second=0, microsecond=0)
-    caught_total = (await db.execute(select(func.count(CaughtIP.id)))).scalar_one()
-    caught_today = (await db.execute(select(func.count(CaughtIP.id)).where(CaughtIP.caught_at >= today))).scalar_one()
-    held = (await db.execute(select(func.count(CaughtIP.id)).where(CaughtIP.on_account.is_(True)))).scalar_one()
+    mine = lambda stmt: scope.owned(stmt, CaughtIP, current)  # noqa: E731
+    caught_total = (await db.execute(mine(select(func.count(CaughtIP.id))))).scalar_one()
+    caught_today = (await db.execute(mine(select(func.count(CaughtIP.id)).where(CaughtIP.caught_at >= today)))).scalar_one()
+    held = (await db.execute(mine(select(func.count(CaughtIP.id)).where(CaughtIP.on_account.is_(True))))).scalar_one()
     day_ago = utcnow() - timedelta(hours=24)
-    attempts_24h = (await db.execute(select(func.coalesce(func.sum(MetricPoint.attempts), 0)).where(
-        MetricPoint.bucket >= day_ago))).scalar_one()
-    last = (await db.execute(select(CaughtIP).order_by(CaughtIP.caught_at.desc()).limit(6))).scalars().all()
+    points = select(func.coalesce(func.sum(MetricPoint.attempts), 0)).where(MetricPoint.bucket >= day_ago)
+    points = points.where(MetricPoint.key_id.in_([k.id for k in keys] or [-1]))
+    attempts_24h = (await db.execute(points)).scalar_one()
+    last = (await db.execute(mine(select(CaughtIP).order_by(CaughtIP.caught_at.desc()).limit(6)))).scalars().all()
     names = {k.id: k.name for k in keys}
     hunting = [k for k in keys if manager.runtime(k.id) and k.status in {"hunting", "sleeping", "starting"}]
     return {
@@ -169,7 +181,7 @@ async def overview(_: Current = Depends(current_admin), db: AsyncSession = Depen
                     "dead": sum(p.status == "dead" for p in proxies)},
         "subnets": {"total": len(subnets), "enabled": sum(s.enabled for s in subnets)},
         "caught": {"total": caught_total, "today": caught_today, "held": held},
-        "rate_per_min": metrics.rate_per_minute(),
+        "rate_per_min": round(sum(metrics.rate_per_minute(k.id) for k in keys), 2),
         "attempts_24h": int(attempts_24h),
         "last_caught": [caught_view(c, names.get(c.key_id)) for c in last],
     }
@@ -182,7 +194,7 @@ PERIODS = {"1h": (timedelta(hours=1), 60), "24h": (timedelta(hours=24), 900),
 
 
 @router.get("/metrics")
-async def get_metrics(period: Literal["1h", "24h", "7d", "30d"] = "24h", _: Current = Depends(current_admin),
+async def get_metrics(period: Literal["1h", "24h", "7d", "30d"] = "24h", current: Current = Depends(current_admin),
                       db: AsyncSession = Depends(get_db)) -> dict:
     await metrics.flush()  # свежие счётчики из памяти — сразу в выборку
     span, step = PERIODS[period]
@@ -190,8 +202,10 @@ async def get_metrics(period: Literal["1h", "24h", "7d", "30d"] = "24h", _: Curr
     since = now - span
     start_ts = int(since.timestamp()) // step * step
     n_steps = int((now.timestamp() - start_ts) // step) + 1
-    points = (await db.execute(select(MetricPoint).where(MetricPoint.bucket >= since))).scalars().all()
-    keys = {k.id: k for k in (await db.execute(select(SelectelKey))).scalars()}
+    mine = await scope.visible_key_ids(db, current)
+    only_mine = lambda stmt: stmt.where(MetricPoint.key_id.in_(mine or {-1}))  # noqa: E731
+    points = (await db.execute(only_mine(select(MetricPoint).where(MetricPoint.bucket >= since)))).scalars().all()
+    keys = {k.id: k for k in (await db.execute(scope.owned(select(SelectelKey), SelectelKey, current))).scalars()}
 
     fields = ("attempts", "busy", "misses", "errors", "timeouts", "proxy_errors", "caught")
     series = [{"t": (start_ts + i * step) * 1000, **{f: 0 for f in fields}, "lat_sum": 0.0, "lat_n": 0}
@@ -234,7 +248,8 @@ async def get_metrics(period: Literal["1h", "24h", "7d", "30d"] = "24h", _: Curr
         })
     key_rows.sort(key=lambda r: (-r["caught"], -r["attempts"]))
 
-    caught_rows = (await db.execute(select(CaughtIP).where(CaughtIP.caught_at >= since))).scalars().all()
+    caught_rows = (await db.execute(scope.owned(select(CaughtIP).where(CaughtIP.caught_at >= since),
+                                                CaughtIP, current))).scalars().all()
     by_subnet: dict[str, int] = defaultdict(int)
     by_account: dict[str, int] = defaultdict(int)
     for c in caught_rows:
@@ -245,10 +260,11 @@ async def get_metrics(period: Literal["1h", "24h", "7d", "30d"] = "24h", _: Curr
     # «Когда ловится»: попытки и поимки по дню недели × часу (МСК) за всё время хранения.
     heat_attempts = [[0] * 24 for _ in range(7)]
     heat_caught = [[0] * 24 for _ in range(7)]
-    for p in (await db.execute(select(MetricPoint.bucket, MetricPoint.attempts))).all():
+    for p in (await db.execute(only_mine(select(MetricPoint.bucket, MetricPoint.attempts)))).all():
         local = p.bucket.astimezone(MSK)
         heat_attempts[local.weekday()][local.hour] += p.attempts or 0
-    for c in (await db.execute(select(CaughtIP.caught_at).where(CaughtIP.source == "hunt"))).scalars():
+    for c in (await db.execute(scope.owned(select(CaughtIP.caught_at).where(CaughtIP.source == "hunt"),
+                                           CaughtIP, current))).scalars():
         local = c.astimezone(MSK)
         heat_caught[local.weekday()][local.hour] += 1
 
@@ -276,12 +292,12 @@ async def get_settings(_: Current = Depends(current_admin)) -> dict:
 
 
 @router.put("/settings")
-async def put_settings(body: dict[str, Any], current: Current = Depends(current_admin)) -> dict:
+async def put_settings(body: dict[str, Any], current: Current = Depends(scope.owner_only)) -> dict:
     errors = _validate_settings(body)
     if errors:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "; ".join(errors))
     view = await settings_store.update(body)
-    await audit(current, "settings.update", "", {k: ("***" if k in ("tg_bot_token", "bsboard_key") else v)
+    await audit(current, "settings.update", "", {k: ("***" if k in ("tg_bot_token", "bsboard_key", "admin_bot_token") else v)
                                                  for k, v in body.items()})
     manager.settings_changed()
     bus.publish("settings", view)
@@ -311,7 +327,7 @@ class TgTestIn(BaseModel):
 
 
 @router.post("/settings/telegram/test")
-async def telegram_test(body: TgTestIn, _: Current = Depends(current_admin)) -> dict:
+async def telegram_test(body: TgTestIn, _: Current = Depends(scope.owner_only)) -> dict:
     token = body.token or settings_store.secret("tg_bot_token")
     chat = body.chat_id or str(settings_store.get("tg_chat_id") or "")
     if not token or not chat:
@@ -323,7 +339,7 @@ async def telegram_test(body: TgTestIn, _: Current = Depends(current_admin)) -> 
 
 
 @router.post("/settings/telegram/chats")
-async def telegram_chats(body: TgTestIn, _: Current = Depends(current_admin)) -> list[dict]:
+async def telegram_chats(body: TgTestIn, _: Current = Depends(scope.owner_only)) -> list[dict]:
     token = body.token or settings_store.secret("tg_bot_token")
     if not token:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Сначала укажите токен бота")
@@ -333,7 +349,10 @@ async def telegram_chats(body: TgTestIn, _: Current = Depends(current_admin)) ->
 # ── Живой поток ────────────────────────────────────────────────────────────
 
 @router.get("/stream")
-async def stream(request: Request, _: Current = Depends(current_admin)) -> StreamingResponse:
+async def stream(request: Request, current: Current = Depends(current_admin)) -> StreamingResponse:
+    flt = StreamFilter(current.admin.id, scope.is_owner(current))
+    await flt.refresh(force=True)
+
     async def gen():  # noqa: ANN202
         queue = bus.open_queue()
         try:
@@ -344,7 +363,9 @@ async def stream(request: Request, _: Current = Depends(current_admin)) -> Strea
                 except TimeoutError:
                     yield ": keepalive\n\n"
                     continue
-                yield f"data: {message}\n\n"
+                message = await flt.apply(message)
+                if message is not None:
+                    yield f"data: {message}\n\n"
         finally:
             bus.close_queue(queue)
 

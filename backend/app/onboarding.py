@@ -43,9 +43,12 @@ async def _request(client: httpx.AsyncClient, method: str, url: str, *, step: st
 _last_onboarding_proxy: dict[str, int] = {}
 
 
-async def random_connection_proxy(account_id: str) -> tuple[int, str]:
+async def random_connection_proxy(account_id: str, owner_id: int | None = None) -> tuple[int, str]:
     async with session_scope() as db:
-        proxies = (await db.execute(select(Proxy))).scalars().all()
+        stmt = select(Proxy)
+        if owner_id is not None:
+            stmt = stmt.where(Proxy.owner_id == owner_id)
+        proxies = (await db.execute(stmt)).scalars().all()
         proxy = choose_random_proxy(proxies, _last_onboarding_proxy.get(account_id))
         if proxy is None:
             raise OnboardingError("Нет доступных прокси. Добавьте или проверьте прокси.")
@@ -58,7 +61,8 @@ async def random_connection_proxy(account_id: str) -> tuple[int, str]:
 
 
 async def onboard_account(account_id: str, proxy_id: int | None, project_name: str, iam_token: str,
-                          *, connection_proxy: tuple[int, str] | None = None) -> tuple[SelectelKey, bool]:
+                          *, connection_proxy: tuple[int, str] | None = None,
+                          owner_id: int | None = None) -> tuple[SelectelKey, bool]:
     """Создаёт проект и сервисного пользователя, возвращает (ключ, добавлен)."""
     project_name = project_name.strip() or f"toffee-roller-{account_id}"
     if len(project_name) > 64 or not project_name.isprintable():
@@ -74,14 +78,22 @@ async def onboard_account(account_id: str, proxy_id: int | None, project_name: s
             SelectelKey.account_id == account_id, SelectelKey.username == username,
         ))
         if existing:
+            if owner_id is not None and existing.owner_id not in (None, owner_id):
+                raise OnboardingError("Этот аккаунт Selectel уже подключён другим пользователем панели.")
             return existing, False
+        taken = await db.scalar(select(SelectelKey).where(
+            SelectelKey.account_id == account_id, SelectelKey.owner_id != owner_id))
+        if owner_id is not None and taken:
+            raise OnboardingError("Этот аккаунт Selectel уже подключён другим пользователем панели.")
     password = "Aa1!" + secrets.token_hex(24)
     password_enc = encrypt(password)
     headers = {"X-Auth-Token": iam_token}
 
     async def _provision() -> tuple[SelectelKey, bool]:
         # One proxy session for the complete login/provisioning flow; new on every attempt.
-        proxy_id, proxy_url = connection_proxy or await random_connection_proxy(account_id)
+        proxy_id, proxy_url = connection_proxy or (
+            await random_connection_proxy(account_id) if owner_id is None
+            else await random_connection_proxy(account_id, owner_id))
         async with httpx.AsyncClient(proxy=proxy_url, trust_env=False, timeout=httpx.Timeout(25, connect=8)) as client:
             try:
                 account = (await _request(client, "GET", f"{RESELL_BASE_URL}/accounts", headers=headers,
@@ -147,7 +159,7 @@ async def onboard_account(account_id: str, proxy_id: int | None, project_name: s
                         name=project.name, account_id=account_id, username=username, password_enc=password_enc,
                         project_id=project.id, project_name=project.name, enabled=False, status="paused",
                         status_reason="Подключён через IAM. Нажмите «Запустить», когда будете готовы.",
-                        proxy_mode="auto", proxy_id=proxy_id,
+                        proxy_mode="auto", proxy_id=proxy_id, owner_id=owner_id,
                     )
                     db.add(key)
             except Exception as exc:

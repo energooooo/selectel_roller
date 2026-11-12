@@ -33,6 +33,7 @@ const INVALIDATE: Record<string, string[]> = {
     settings: ["/settings"],
     money: ["/finance", "/sales"],
     vds: ["/caught", "/vds", "/finance"],
+    users: ["/users"],
 }
 
 /**

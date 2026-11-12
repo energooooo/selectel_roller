@@ -15,6 +15,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app import auto_onboarding, browser_onboarding, bus, metrics, settings_store
+from app.auth import scope
 from app.auth.deps import Current, audit, current_admin
 from app.core.crypto import decrypt, encrypt
 from app.db.models import CaughtIP, Proxy, SelectelKey, Subnet, utcnow
@@ -55,16 +56,15 @@ async def _view(db: AsyncSession, key: SelectelKey) -> dict[str, Any]:
     return key_view(key, proxy, held)
 
 @router.get("")
-async def list_keys(_: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
+async def list_keys(current: Current = Depends(current_admin), db: AsyncSession = Depends(get_db)) -> list[dict]:
     held = (select(CaughtIP.key_id, func.count().label("total"))
             .where(CaughtIP.on_account.is_(True), CaughtIP.key_id.is_not(None))
             .group_by(CaughtIP.key_id).subquery())
-    rows = await db.execute(
+    rows = await db.execute(scope.owned(
         select(SelectelKey, Proxy, func.coalesce(held.c.total, 0))
         .outerjoin(Proxy, Proxy.id == SelectelKey.proxy_id)
         .outerjoin(held, held.c.key_id == SelectelKey.id)
-        .order_by(SelectelKey.id)
-    )
+        .order_by(SelectelKey.id), SelectelKey, current))
     return [key_view(key, proxy, count) for key, proxy, count in rows]
 
 class KeyIn(BaseModel):
@@ -78,15 +78,16 @@ class KeyIn(BaseModel):
     ip_goal: int | None = Field(default=None, ge=1, le=50)
     start: bool = True
 
-async def _pick_proxy_url(db: AsyncSession, body: KeyIn) -> tuple[str | None, int | None]:
+async def _pick_proxy_url(db: AsyncSession, body: KeyIn, current: Current) -> tuple[str | None, int | None]:
     if body.proxy_mode == "none":
         return None, None
     if body.proxy_mode == "fixed":
         proxy = await db.get(Proxy, body.proxy_id) if body.proxy_id else None
-        if proxy is None:
+        if proxy is None or proxy.owner_id != current.admin.id:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Выберите прокси для ключа")
     else:
-        proxies = [p for p in (await db.execute(select(Proxy))).scalars() if p.status in {"ok", "partial", "unchecked"}]
+        mine = select(Proxy).where(Proxy.owner_id == current.admin.id)
+        proxies = [p for p in (await db.execute(mine)).scalars() if p.status in {"ok", "partial", "unchecked"}]
         if not proxies:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 "Нет рабочих прокси. Добавьте прокси или выберите «Без прокси».")
@@ -100,8 +101,14 @@ async def _create_key(db: AsyncSession, body: KeyIn, current: Current) -> dict[s
     dup = (await db.execute(select(SelectelKey).where(
         SelectelKey.account_id == body.account_id, SelectelKey.username == body.username))).scalar()
     if dup:
-        raise HTTPException(status.HTTP_409_CONFLICT, f"Такой ключ уже есть: {dup.name}")
-    proxy_url, proxy_id = await _pick_proxy_url(db, body)
+        raise HTTPException(status.HTTP_409_CONFLICT, f"Такой ключ уже есть: {dup.name}" if scope.can_see(dup, current)
+                            else "Этот ключ уже подключён другим пользователем панели")
+    # Один аккаунт Selectel — один кабинет: два кабинета на одном аккаунте удвоят частоту запросов и словят бан.
+    other = (await db.execute(select(SelectelKey).where(
+        SelectelKey.account_id == body.account_id, SelectelKey.owner_id != current.admin.id))).scalar()
+    if other:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Этот аккаунт Selectel уже подключён другим пользователем панели")
+    proxy_url, proxy_id = await _pick_proxy_url(db, body, current)
     try:
         project_id, project_name = await resolve_project(body.username, body.password, body.account_id,
                                                          proxy_url, body.project_name.strip())
@@ -130,7 +137,7 @@ async def _create_key(db: AsyncSession, body: KeyIn, current: Current) -> dict[s
         password_enc=encrypt(body.password), project_id=project_id, project_name=project_name,
         enabled=body.start, status="starting" if body.start else "paused",
         status_reason="" if body.start else "Добавлен без запуска",
-        proxy_mode=body.proxy_mode, proxy_id=proxy_id, ip_goal=body.ip_goal,
+        proxy_mode=body.proxy_mode, proxy_id=proxy_id, ip_goal=body.ip_goal, owner_id=current.admin.id,
     )
     db.add(key)
     await db.commit()
@@ -237,7 +244,10 @@ async def onboard(
     if scheme.lower() != "bearer" or not token or not token.isascii() or not token.isprintable() or " " in token:
         raise HTTPException(422, "Введите IAM-токен с областью доступа «Аккаунт».")
     try:
-        key, added = await onboard_account(body.account_id, body.proxy_id, body.project_name, token)
+        if body.proxy_id is not None:
+            await scope.get_owned(db, Proxy, body.proxy_id, current, "Нет такого прокси")
+        key, added = await onboard_account(body.account_id, body.proxy_id, body.project_name, token,
+                                           owner_id=current.admin.id)
     except OnboardingPaymentRequired as exc:
         raise HTTPException(402, str(exc)) from exc
     except OnboardingError as exc:
@@ -326,9 +336,11 @@ class KeyPatch(BaseModel):
 @router.patch("/{key_id}")
 async def update_key(key_id: int, body: KeyPatch, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> dict:
-    key = await db.get(SelectelKey, key_id)
-    if key is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key = await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
+    if body.proxy_mode == "fixed" and body.proxy_id is not None:
+        proxy = await db.get(Proxy, body.proxy_id)
+        if proxy is None or proxy.owner_id != key.owner_id:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Выберите прокси из этого кабинета")
     restart = False
     if body.name is not None:
         key.name = body.name.strip() or key.name
@@ -354,9 +366,7 @@ async def update_key(key_id: int, body: KeyPatch, current: Current = Depends(cur
 
 
 async def _set_enabled(db: AsyncSession, key_id: int, enabled: bool, current: Current) -> dict:
-    key = await db.get(SelectelKey, key_id)
-    if key is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key = await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
     key.enabled = enabled
     if enabled:
         key.status, key.status_reason = "starting", ""
@@ -391,6 +401,7 @@ class PauseKeysIn(BaseModel):
 async def pause_keys(body: PauseKeysIn, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> dict[str, int]:
     stmt = update(SelectelKey).where(SelectelKey.enabled.is_(True), SelectelKey.status.not_in(TERMINAL))
+    stmt = stmt.where(SelectelKey.owner_id == current.admin.id)
     if body.key_ids is not None:
         stmt = stmt.where(SelectelKey.id.in_(set(body.key_ids)))
     result = await db.scalars(
@@ -410,9 +421,7 @@ async def pause_keys(body: PauseKeysIn, current: Current = Depends(current_admin
 async def rotate_proxy(key_id: int, current: Current = Depends(current_admin),
                        db: AsyncSession = Depends(get_db)) -> dict:
     """Пересадить ключ на другой прокси (auto) или на новую липкую сессию."""
-    key = await db.get(SelectelKey, key_id)
-    if key is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key = await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
     if key.proxy_mode == "auto":
         key.proxy_id = None
     key.proxy_session_gen = (key.proxy_session_gen or 0) + 1
@@ -427,9 +436,7 @@ async def rotate_proxy(key_id: int, current: Current = Depends(current_admin),
 async def reset_pace(key_id: int, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> dict:
     """Вернуть темп ключа к настройкам (×1) — например, когда бан точно снят."""
-    key = await db.get(SelectelKey, key_id)
-    if key is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key = await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
     key.pace, key.pace_reason = 1.0, ""
     await db.commit()
     await manager.reset_pace(key_id)
@@ -441,9 +448,7 @@ async def reset_pace(key_id: int, current: Current = Depends(current_admin),
 async def delete_key(key_id: int, current: Current = Depends(current_admin),
                      db: AsyncSession = Depends(get_db)) -> dict:
     """Ключ удаляется из панели. IP на аккаунте Selectel не трогаются, история поимок остаётся."""
-    key = await db.get(SelectelKey, key_id)
-    if key is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Нет такого ключа")
+    key = await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
     key.enabled = False
     await db.commit()
     await manager.reconcile()
@@ -458,9 +463,11 @@ async def delete_key(key_id: int, current: Current = Depends(current_admin),
 # ── floating IP на аккаунте ─────────────────────────────────────────────────
 
 @router.get("/{key_id}/floating-ips")
-async def floating_ips(key_id: int, _: Current = Depends(current_admin)) -> dict:
+async def floating_ips(key_id: int, current: Current = Depends(current_admin)) -> dict:
     """Живой список floating IP аккаунта + сверка с пойманными: ушедшие помечаются,
     белые адреса, которых не ловили (подобраны вручную), добавляются в историю."""
+    async with session_scope() as db:
+        await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
     try:
         client, owned = await manager.client_for_key(key_id)
     except LookupError as exc:
@@ -477,7 +484,8 @@ async def floating_ips(key_id: int, _: Current = Depends(current_admin)) -> dict
 
     async with session_scope() as db:
         key = await db.get(SelectelKey, key_id)
-        subnets = [(s, ipaddress.ip_network(s.cidr, strict=False)) for s in (await db.execute(select(Subnet))).scalars()]
+        subnets = [(s, ipaddress.ip_network(s.cidr, strict=False)) for s in (await db.execute(
+            select(Subnet).where(Subnet.owner_id == key.owner_id))).scalars()]
         caught = {c.floating_ip_id: c for c in (await db.execute(select(CaughtIP).where(
             CaughtIP.account_id == key.account_id))).scalars() if c.floating_ip_id}
         caught_by_ip = {c.ip: c for c in caught.values()}
@@ -490,7 +498,7 @@ async def floating_ips(key_id: int, _: Current = Depends(current_admin)) -> dict
             subnet = next((s for s, net in subnets if _in(r.address, net)), None)
             c = caught.get(r.id) or caught_by_ip.get(r.address)
             if c is None and subnet is not None:
-                c = CaughtIP(ip=r.address, region=r.region, key_id=key.id, account_id=key.account_id,
+                c = CaughtIP(ip=r.address, region=r.region, key_id=key.id, account_id=key.account_id, owner_id=key.owner_id,
                              subnet_id=subnet.id, floating_ip_id=r.id, protected=True, on_account=True,
                              source="adopted", note="найден на аккаунте")
                 db.add(c)
@@ -525,6 +533,7 @@ async def delete_floating_ip(key_id: int, fip_id: str, body: DeleteFipIn,
     """Удаление floating IP руками. Защищённый пойманный IP не удаляется,
     подтверждение — ввод самого адреса."""
     async with session_scope() as db:
+        await scope.get_owned(db, SelectelKey, key_id, current, "Нет такого ключа")
         protected = (await db.execute(select(CaughtIP).where(
             CaughtIP.floating_ip_id == fip_id, CaughtIP.protected.is_(True)))).scalar()
     if protected:

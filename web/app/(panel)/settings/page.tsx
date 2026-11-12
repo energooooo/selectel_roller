@@ -90,7 +90,7 @@ function Range({lo, hi, form, set}: { lo: string; hi: string; form: Form; set: (
 export default function SettingsPage() {
     const {data, mutate} = useApi<Settings>("/settings")
     const [form, setForm] = useState<Form>({})
-    const [secrets, setSecrets] = useState({tg_bot_token: "", bsboard_key: ""})
+    const [secrets, setSecrets] = useState({tg_bot_token: "", bsboard_key: "", admin_bot_token: ""})
     const [busy, setBusy] = useState(false)
     const [chats, setChats] = useState<{ id: string; title: string }[]>([])
 
@@ -102,7 +102,7 @@ export default function SettingsPage() {
 
     const set = (k: string, v: unknown) => setForm((f) => ({...f, [k]: v}))
     const changed = Object.keys(form).filter((k) => JSON.stringify(form[k]) !== JSON.stringify(data[k]))
-    const dirty = changed.length > 0 || Boolean(secrets.tg_bot_token || secrets.bsboard_key)
+    const dirty = changed.length > 0 || Boolean(secrets.tg_bot_token || secrets.bsboard_key || secrets.admin_bot_token)
     const preset = presetOf(form)
 
     const save = async () => {
@@ -112,8 +112,9 @@ export default function SettingsPage() {
             for (const k of changed) body[k] = form[k]
             if (secrets.tg_bot_token) body.tg_bot_token = secrets.tg_bot_token
             if (secrets.bsboard_key) body.bsboard_key = secrets.bsboard_key
+            if (secrets.admin_bot_token) body.admin_bot_token = secrets.admin_bot_token
             await put("/settings", body)
-            setSecrets({tg_bot_token: "", bsboard_key: ""})
+            setSecrets({tg_bot_token: "", bsboard_key: "", admin_bot_token: ""})
             await mutate()
             toast.success("Настройки сохранены и уже действуют")
         } catch (e) {
@@ -319,6 +320,20 @@ export default function SettingsPage() {
                     </div>
                 </Section>
 
+                <Section title="Админ-бот"
+                         text="Сюда приходят заявки на доступ к панели с кнопками «Принять» и «Отклонить». Решать могут только перечисленные Telegram-аккаунты.">
+                    <div className="space-y-4">
+                        <Field label="Токен бота" hint={data.admin_bot_token_set ? "Токен сохранён и зашифрован. Впишите новый, только если меняете бота." : "Возьмите у @BotFather."}>
+                            <Input type="password" value={secrets.admin_bot_token} autoComplete="off" placeholder={data.admin_bot_token_set ? "Сохранён" : "123456789:AA…"}
+                                   onChange={(e) => setSecrets({...secrets, admin_bot_token: e.target.value})}/>
+                        </Field>
+                        <Field label="Кто решает по заявкам" hint="Telegram-id через запятую. Каждый должен один раз написать боту /start — после этого бот сможет ему писать.">
+                            <Input value={String(form.admin_tg_ids ?? "")} onChange={(e) => set("admin_tg_ids", e.target.value)}
+                                   className="font-mono" placeholder="1152862206"/>
+                        </Field>
+                    </div>
+                </Section>
+
                 <Section title="Проверка найденных IP"
                          text="Каждый найденный адрес можно автоматически проверять через сервис bsboard. Пока адрес сервиса не указан, проверка выключена.">
                     <div className="space-y-4">
@@ -343,7 +358,7 @@ export default function SettingsPage() {
                         <div className="flex gap-2">
                             <Button size="sm" variant="ghost" onClick={() => {
                                 setForm(data)
-                                setSecrets({tg_bot_token: "", bsboard_key: ""})
+                                setSecrets({tg_bot_token: "", bsboard_key: "", admin_bot_token: ""})
                             }}>Отменить</Button>
                             <Button size="sm" onClick={save} disabled={busy}><FloppyDisk weight="bold"/> Сохранить</Button>
                         </div>

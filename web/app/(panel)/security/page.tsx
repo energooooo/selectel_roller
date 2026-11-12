@@ -10,13 +10,15 @@ import {Card, CardHeader, Dialog, Field, Input, Mono, PageHeader, Skeleton} from
 import {ApiError, del, post, useApi} from "@/lib/api"
 import {fmtAgo, fmtDateTime} from "@/lib/format"
 
-interface Me { login: string; totp_enabled: boolean; backup_codes_left: number; password_changed_at: string }
+interface Me { login: string; role: "owner" | "user"; totp_enabled: boolean; backup_codes_left: number; password_changed_at: string }
 interface SessionRow { id: number; ip: string; user_agent: string; created_at: string; last_seen_at: string; current: boolean }
 interface Attempt { id: number; ts: string; ip: string; login: string; ok: boolean; reason: string }
 interface Audit { id: number; ts: string; ip: string; action: string; target: string }
 
 const REASONS: Record<string, string> = {
     ok: "Вход", setup: "Первый вход", bad_credentials: "Неверный логин или пароль", bad_code: "Неверный код", bad_setup_token: "Неверный код создания",
+    registered: "Заявка на доступ", status_pending: "Вход до одобрения заявки", status_rejected: "Вход по отклонённой заявке",
+    status_blocked: "Вход заблокированного",
 }
 
 function browser(ua: string) {
@@ -77,8 +79,10 @@ function TotpSetup({onDone}: { onDone: () => void }) {
 export default function SecurityPage() {
     const {data: me, mutate: reloadMe} = useApi<Me>("/auth/me")
     const {data: sessions, mutate: reloadSessions} = useApi<SessionRow[]>("/auth/sessions")
-    const {data: attempts} = useApi<Attempt[]>("/auth/attempts?limit=50")
-    const {data: audit} = useApi<Audit[]>("/auth/audit?limit=50")
+    // Журналы входов и изменений — у владельца панели (там все пользователи).
+    const isOwner = me?.role === "owner"
+    const {data: attempts} = useApi<Attempt[]>(isOwner ? "/auth/attempts?limit=50" : null)
+    const {data: audit} = useApi<Audit[]>(isOwner ? "/auth/audit?limit=50" : null)
     const [totpOpen, setTotpOpen] = useState(false)
     const [disableOpen, setDisableOpen] = useState(false)
     const [pw, setPw] = useState({current: "", next: "", next2: ""})
@@ -166,7 +170,7 @@ export default function SecurityPage() {
                 </div>
             </Card>
 
-            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+            {isOwner && <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
                 <Card>
                     <CardHeader title="История входов" hint="Удачные и неудачные попытки войти."/>
                     <div className="max-h-[420px] overflow-y-auto p-5 pt-3">
@@ -192,7 +196,7 @@ export default function SecurityPage() {
                         )) : <p className="py-4 text-center text-[13px] text-subtle">Пока пусто</p>}
                     </div>
                 </Card>
-            </div>
+            </div>}
 
             <Dialog open={totpOpen} onOpenChange={setTotpOpen} title="Включить вход по коду" className="sm:max-w-2xl">
                 <TotpSetup onDone={() => {

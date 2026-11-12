@@ -18,12 +18,12 @@ from getpass import GetPassWarning, getpass
 from pathlib import Path
 
 from dotenv import dotenv_values
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.config import BACKEND_DIR
 from app.core.crypto import encrypt
 from app.db.migrate import upgrade_db
-from app.db.models import Proxy, RegionPool, SelectelKey, Subnet
+from app.db.models import Admin, Proxy, RegionPool, SelectelKey, Subnet
 from app.db.session import session_scope
 from app.engine.proxy import ProxyParseError, parse_proxy_line
 from app.onboarding import OnboardingError, onboard_account
@@ -74,6 +74,8 @@ async def import_legacy() -> None:
     report: dict[str, int] = {}
 
     async with session_scope() as db:
+        # Старые данные — в кабинет владельца панели.
+        owner = (await db.execute(select(func.min(Admin.id)).where(Admin.role == "owner"))).scalar()
         # Прокси: общий SEL_PROXY (липкие сессии в пароле) + список .secrets/proxies.txt
         proxy_lines: list[tuple[str, str, str]] = []
         if env.get("SEL_PROXY"):
@@ -89,11 +91,12 @@ async def import_legacy() -> None:
                 parsed = parse_proxy_line(line)
             except ProxyParseError:
                 continue
-            exists = (await db.execute(select(Proxy).where(Proxy.fingerprint == parsed.fingerprint))).scalar()
+            exists = (await db.execute(select(Proxy).where(Proxy.fingerprint == parsed.fingerprint,
+                                                           Proxy.owner_id == owner))).scalar()
             if exists:
                 continue
             db.add(Proxy(url_enc=encrypt(parsed.url), fingerprint=parsed.fingerprint, display=parsed.display,
-                         label=label or parsed.label, kind=parsed.kind, session_mode=mode))
+                         label=label or parsed.label, kind=parsed.kind, session_mode=mode, owner_id=owner))
             added += 1
         report["прокси"] = added
 
@@ -110,6 +113,7 @@ async def import_legacy() -> None:
                 password_enc=encrypt(acc["password"]), project_name=acc["project_name"],
                 project_id=acc["project_id"], enabled=False, status="paused",
                 status_reason="Перенесён из старой версии. Нажмите «Запустить», когда будете готовы.",
+                owner_id=owner,
             ))
             added += 1
         report["ключи"] = added
@@ -146,11 +150,11 @@ async def import_legacy() -> None:
             if net.prefixlen == 32:
                 # Отдельные адреса: Selectel не даёт запрашивать конкретный IP (403 Policy) — не цели.
                 continue
-            exists = (await db.execute(select(Subnet).where(Subnet.cidr == str(net)))).scalar()
+            exists = (await db.execute(select(Subnet).where(Subnet.cidr == str(net), Subnet.owner_id == owner))).scalar()
             if exists:
                 continue
             region = next((r for r, p in pool_nets if net.subnet_of(p)), "")
-            db.add(Subnet(cidr=str(net), region=region, enabled=bool(region), source="import",
+            db.add(Subnet(cidr=str(net), region=region, enabled=bool(region), source="import", owner_id=owner,
                           note="" if region else "Selectel не выдаёт эту подсеть как floating IP"))
             added += 1
         report["подсети"] = added

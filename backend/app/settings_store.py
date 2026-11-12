@@ -58,13 +58,17 @@ DEFAULTS: dict[str, Any] = {
     "notify_rotations": False,
     "notify_daily": True,
     "notify_money": True,  # мало денег на аккаунте, срок IP подходит
+    # Админ-бот: заявки на регистрацию с кнопками «Принять / Отклонить»
+    "admin_bot_token_enc": None,
+    "admin_tg_ids": "",  # Telegram-id через запятую — кто может одобрять заявки
     # Проверка пойманных IP
     "bsboard_url": "",
     "bsboard_key_enc": None,
     "bsboard_recheck_hours": 6,
 }
 
-SECRET_FIELDS = {"tg_bot_token_enc": "tg_bot_token", "bsboard_key_enc": "bsboard_key"}
+SECRET_FIELDS = {"tg_bot_token_enc": "tg_bot_token", "bsboard_key_enc": "bsboard_key",
+                 "admin_bot_token_enc": "admin_bot_token"}
 
 _cache: dict[str, Any] = copy.deepcopy(DEFAULTS)
 
