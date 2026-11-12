@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Toffee Roller</title>
+    <link rel="stylesheet" href="style.css">
+    <script src="ui.js" defer></script>
+    <script src="popup.js" defer></script>
+</head>
+<body class="popup">
+<header class="pop-head">
+    <span class="brand"><span data-logo></span><span>Toffee <span class="text-brand">Roller</span></span></span>
+    <span class="chip" id="chip"><span class="dot"></span><span id="chip-text">Проверяем…</span></span>
+</header>
+
+<main class="pop-body" id="loading" aria-busy="true">
+    <div class="skeleton" style="height: 14px; width: 60%"></div>
+    <div class="skeleton" style="height: 52px; margin-top: 14px"></div>
+    <div class="skeleton" style="height: 52px; margin-top: 6px"></div>
+    <div class="skeleton" style="height: 52px; margin-top: 6px"></div>
+</main>
+
+<main class="pop-body pop-empty" id="disconnected" hidden>
+    <span class="disc" data-tone="warn" data-icon="plug"></span>
+    <h2 id="empty-title">Подключите расширение к панели</h2>
+    <p id="empty-text">Нужны адрес панели и код из 10 символов — это займёт полминуты.</p>
+    <button type="button" class="btn btn-brand btn-block" id="open-connect">Ввести код из панели</button>
+</main>
+
+<main class="pop-body" id="connected" hidden>
+    <div class="pop-meta">
+        <span>Панель</span>
+        <span class="mono" id="base"></span>
+    </div>
+    <label class="search" id="search-wrap" hidden>
+        <span class="sr-only" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)">Поиск аккаунта</span>
+        <span data-icon="search"></span>
+        <input class="input" id="search" type="search" placeholder="Почта или номер аккаунта" autocomplete="off" spellcheck="false">
+    </label>
+    <ul class="list" id="list" aria-label="Аккаунты"></ul>
+    <div class="pop-actions">
+        <button type="button" class="btn btn-brand btn-sm" id="open-panel"><span data-icon="external"></span>Открыть панель</button>
+        <button type="button" class="btn btn-outline btn-sm" id="open-selectel">Вход Selectel</button>
+    </div>
+</main>
+
+<footer class="pop-foot">
+    <span class="mono" id="version"></span>
+    <button type="button" class="link" id="open-settings">Подключение</button>
+</footer>
+</body>
+</html>

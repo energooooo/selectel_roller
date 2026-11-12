@@ -1,0 +1,28 @@
+services:
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: sqlite+aiosqlite:////data/roller.db
+    volumes:
+      - roller-data:/data
+    # Наружу не публикуется: в backend ходит только web.
+    expose:
+      - "8200"
+
+  web:
+    build:
+      context: ./web
+      args:
+        BACKEND_URL: http://backend:8200
+    restart: unless-stopped
+    environment:
+      BACKEND_URL: http://backend:8200
+    depends_on:
+      - backend
+    ports:
+      - "${ROLLER_BIND_IP:-127.0.0.1}:3200:3200"
+
+volumes:
+  roller-data:

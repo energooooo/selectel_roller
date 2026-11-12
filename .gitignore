@@ -1,53 +1,36 @@
-# ── Секреты и локальная конфигурация ──────────────────────────────────────────
+# Секреты и локальная конфигурация
 .env
-config.json
-*.json
-!version.json
-
-# ── Логи ──────────────────────────────────────────────────────────────────────
-*.log
-app_rolling.log
-
-# ── Ключи / сертификаты ───────────────────────────────────────────────────────
-*_key.json
-sa_key.json
-authorized_key.json
-*.pem
-*.key
-
-# ── Python ────────────────────────────────────────────────────────────────────
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.pytest_cache/
-.coverage
-.tox/
-.hypothesis/
-
-# ── Виртуальные окружения ─────────────────────────────────────────────────────
-env/
-venv/
-.env
-.venv/
-
-# ── Временные данные (runtime) ────────────────────────────────────────────────
-temp/
-tmp/
-
-# ── Сборка ────────────────────────────────────────────────────────────────────
-dist/
-build/
-*.egg-info/
-source/
-
-# ── ОС ────────────────────────────────────────────────────────────────────────
-.DS_Store
-Thumbs.db
-
-# ── Telegram-сессия (полный доступ к аккаунту) ────────────────────────────────
+.env.*
+!.env.example
 .secrets/
 *.session
 *.session-journal
-proxies.txt
+*.pem
+*.key
+
+# База и рантайм
+backend/data/
+temp/
+*.log
+/backend/combined_code.txt
+/backend/error_page.html
+/backend/error_page.png
+
+# Локальная установка внешнего скилла (источник закреплён в skills-lock.json).
+/.agents/skills/design-taste-frontend/
+/.claude/skills/design-taste-frontend/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Node
+node_modules/
+.next/
+*.tsbuildinfo
+
+# ОС
+.DS_Store
+Thumbs.db

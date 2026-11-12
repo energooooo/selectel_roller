@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="ru">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>Подключение · Toffee Roller</title>
+    <link rel="icon" href="icons/icon-32.png">
+    <link rel="stylesheet" href="style.css">
+    <script src="ui.js" defer></script>
+    <script src="accounts.js" defer></script>
+</head>
+<body class="page">
+<main class="shell">
+    <header>
+        <span class="brand"><span data-logo></span><span>Toffee <span class="text-brand">Roller</span></span></span>
+        <span class="chip" id="chip"><span class="dot"></span><span id="chip-text">Проверяем…</span></span>
+    </header>
+
+    <section class="card" id="loading" aria-busy="true">
+        <div class="skeleton" style="height: 28px; width: 70%"></div>
+        <div class="skeleton" style="height: 16px; width: 90%; margin-top: 14px"></div>
+        <div class="skeleton" style="height: 46px; margin-top: 28px"></div>
+        <div class="skeleton" style="height: 54px; margin-top: 20px"></div>
+    </section>
+
+    <section class="card" id="disconnected" hidden>
+        <h1>Подключите расширение к&nbsp;панели</h1>
+        <p class="lead">Один раз на этот браузер. Адрес и код показаны в панели Toffee Roller:</p>
+        <p class="where"><b>Ключи</b> › <b>Подключить аккаунты</b> › <b>Подключить расширение</b></p>
+
+        <form class="form" id="pair-form" novalidate>
+            <div class="field">
+                <label for="address">Адрес панели</label>
+                <input class="input mono" id="address" name="address" type="text" inputmode="url"
+                       placeholder="https://panel.example.ru" autocomplete="url" spellcheck="false"
+                       aria-describedby="address-hint">
+                <p class="hint" id="address-hint">Ссылка, по которой вы открываете панель.</p>
+            </div>
+
+            <div class="field">
+                <div class="label-row">
+                    <span class="label" id="code-label">Код сопряжения</span>
+                    <button type="button" class="link" id="clear-code" hidden>Очистить</button>
+                </div>
+                <div class="otp" id="otp" role="group" aria-labelledby="code-label" aria-describedby="code-hint"></div>
+                <p class="hint" id="code-hint">10 букв и цифр. Код одноразовый и живёт 5 минут — его можно вставить целиком.</p>
+            </div>
+
+            <button type="submit" class="btn btn-brand btn-block" id="connect">Подключить к панели</button>
+            <div class="alert" id="status" role="status" hidden></div>
+        </form>
+    </section>
+
+    <section class="card" id="connected" hidden>
+        <div class="success-head">
+            <span class="disc" data-tone="ok" data-icon="check"></span>
+            <div style="min-width: 0">
+                <h1>Расширение подключено</h1>
+                <p class="muted mono" id="base" style="font-size: 13.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap"></p>
+            </div>
+        </div>
+
+        <div class="alert" id="connected-status" role="status" hidden style="margin-top: 18px"></div>
+
+        <dl class="stats">
+            <div>
+                <dt>Аккаунтов в панели</dt>
+                <dd id="count">—</dd>
+            </div>
+            <div>
+                <dt>Уже подключены</dt>
+                <dd id="onboarded">—</dd>
+            </div>
+        </dl>
+
+        <div class="actions">
+            <button type="button" class="btn btn-brand" id="open-panel"><span data-icon="external"></span>Открыть панель</button>
+            <button type="button" class="btn btn-outline" id="refresh"><span data-icon="refresh"></span>Обновить</button>
+        </div>
+
+        <ol class="steps">
+            <li><span>В панели нажмите <b>«Войти»</b> у аккаунта — откроется Selectel.</span></li>
+            <li><span>Расширение подставит данные. Пройдите <b>капчу</b> и нажмите «Войти».</span></li>
+            <li><span>Код из почты и подключение ключа — <b>сами</b>. Ход видно в углу страницы Selectel.</span></li>
+        </ol>
+    </section>
+
+    <div class="disconnect-row" id="disconnect-row" hidden>
+        <button type="button" class="btn btn-sm btn-danger-quiet" id="disconnect">Отключить расширение от панели</button>
+    </div>
+
+    <footer class="foot">
+        <span>Toffee Roller для Selectel</span>
+        <span class="mono" id="version"></span>
+    </footer>
+</main>
+</body>
+</html>
