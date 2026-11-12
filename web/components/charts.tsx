@@ -13,12 +13,22 @@ import {cn} from "@/lib/utils"
 export const SERIES = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
 const GRID = "var(--border)"
 
-function niceMax(v: number): number {
-    if (v <= 0) return 1
-    const exp = Math.pow(10, Math.floor(Math.log10(v)))
-    const n = v / exp
-    const step = n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10
-    return step * exp
+/**
+ * Круглая шкала: шаг 1, 2 или 5 × 10ⁿ, 3–5 делений, верхняя отметка выше максимума
+ * (линия не упирается в край). Для счётчиков шаг не дробный.
+ */
+export function niceScale(maxValue: number, target = 4, integer = false): { max: number; ticks: number[] } {
+    const v = Math.max(0, maxValue)
+    if (v <= 0) return {max: 1, ticks: [0, 1]}
+    const raw = v / target
+    const exp = Math.pow(10, Math.floor(Math.log10(raw)))
+    let step = [1, 2, 5, 10].map((m) => m * exp).find((s) => s >= raw) ?? 10 * exp
+    if (integer) step = Math.max(1, Math.ceil(step))
+    let top = Math.ceil(v / step) * step
+    if (top <= v) top += step
+    const ticks: number[] = []
+    for (let t = 0; t <= top + step / 2; t += step) ticks.push(+t.toFixed(10))
+    return {max: top, ticks}
 }
 
 const compact = new Intl.NumberFormat("ru-RU", {notation: "compact", maximumFractionDigits: 1})
@@ -77,11 +87,10 @@ export function LineChart({times, series, height = 240, formatX, unit = ""}: {
     const pad = {l: 44, r: 12, t: 12, b: 26}
     const w = Math.max(200, width), h = height
     const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b
-    const max = niceMax(Math.max(0, ...series.flatMap((s) => s.values)))
+    const {max, ticks} = niceScale(Math.max(0, ...series.flatMap((s) => s.values)))
     const n = times.length
     const x = (i: number) => pad.l + (n > 1 ? (i / (n - 1)) * iw : iw / 2)
     const y = (v: number) => pad.t + ih - (v / max) * ih
-    const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => f * max)
     const xLabels = n > 1 ? [0, Math.floor((n - 1) / 3), Math.floor((2 * (n - 1)) / 3), n - 1] : [0]
 
     const onMove = (e: React.PointerEvent<SVGRectElement>) => {

@@ -13,6 +13,7 @@ import {ApiError, del, post, useApi} from "@/lib/api"
 import {fmtAgo, fmtDateTime, fmtRub} from "@/lib/format"
 import type {AccountMoney, FinanceSummary, Sale, SaleKind, Settings} from "@/lib/types"
 import {cn} from "@/lib/utils"
+import {niceScale} from "@/components/charts"
 
 const MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"]
 
@@ -37,19 +38,11 @@ function Stat({label, help, value, sub, tone, lead, wide}: {
     )
 }
 
-/** Круглая верхняя граница шкалы над максимумом: 1/2/2,5/5 × 10ⁿ. */
-function niceTop(v: number): number {
-    if (v <= 0) return 1000
-    const exp = Math.pow(10, Math.floor(Math.log10(v)))
-    const n = v / exp
-    return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 5 ? 5 : 10) * exp
-}
-
 const tick = new Intl.NumberFormat("ru-RU", {notation: "compact", maximumFractionDigits: 1})
 
 function MonthBars({months}: { months: FinanceSummary["months"] }) {
-    const max = niceTop(Math.max(...months.map((m) => m.income)) * 1.05)
-    const ticks = [max, max / 2, 0]
+    // Пока доходов нет — шкала до 1 000 ₽, чтобы не было «0 / 0,5 / 1 ₽».
+    const {max, ticks} = niceScale(Math.max(...months.map((m) => m.income)) || 999, 3)
     const [hover, setHover] = useState<number | null>(null)
     const shown = hover ?? months.length - 1
     const m = months[shown]
