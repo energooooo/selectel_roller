@@ -8,7 +8,7 @@ const buttonVariants = cva(
     {
         variants: {
             variant: {
-                brand: "bg-brand text-[#140D08] hover:-translate-y-px hover:brightness-110 active:translate-y-px active:scale-[0.985]",
+                brand: "bg-amber text-[#140D08] hover:-translate-y-px hover:brightness-110 active:translate-y-px active:scale-[0.985]",
                 outline: "border border-border-strong bg-transparent text-foreground hover:-translate-y-px hover:border-subtle hover:bg-card-raised active:translate-y-px active:scale-[0.985]",
                 ghost: "text-muted-foreground hover:bg-card hover:text-foreground",
                 danger: "border border-danger/40 bg-danger/10 text-danger hover:bg-danger/20",

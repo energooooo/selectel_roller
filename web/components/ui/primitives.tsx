@@ -185,7 +185,7 @@ export function Switch({checked, onChange, disabled, label}: {
             onClick={() => onChange(!checked)}
             className={cn(
                 "relative inline-flex h-[26px] w-[46px] shrink-0 items-center rounded-full border transition-colors disabled:opacity-50",
-                checked ? "border-transparent bg-brand" : "border-border-strong bg-input hover:border-subtle",
+                checked ? "border-transparent bg-ok" : "border-border-strong bg-input hover:border-subtle",
             )}
         >
             <span
@@ -208,7 +208,7 @@ export function Checkbox({checked, onChange, label}: { checked: boolean; onChang
             onClick={() => onChange(!checked)}
             className={cn(
                 "grid size-5 shrink-0 place-items-center rounded-md border transition-colors",
-                checked ? "border-transparent bg-brand text-[#1A0F08]" : "border-border-strong bg-input hover:border-amber/60",
+                checked ? "border-transparent bg-foreground text-background" : "border-border-strong bg-input hover:border-subtle",
             )}
         >
             {checked && (

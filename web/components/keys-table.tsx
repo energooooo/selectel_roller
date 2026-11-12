@@ -69,7 +69,7 @@ function Checkbox({label, checked, mixed = false, onChange, disabled}: {
     return (
         <label className="grid min-h-11 w-10 cursor-pointer place-items-center has-disabled:cursor-default">
             <input ref={input} type="checkbox" aria-label={label} checked={checked} onChange={onChange} disabled={disabled}
-                   className="size-4 cursor-inherit accent-amber focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber disabled:opacity-50"/>
+                   className="size-4 cursor-inherit accent-foreground focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber disabled:opacity-50"/>
         </label>
     )
 }

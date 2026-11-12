@@ -193,8 +193,7 @@ function NavLinks({onNavigate}: { onNavigate?: () => void }) {
                                           "group relative flex h-10 items-center gap-3 rounded-xl px-3 text-[14.5px] transition-colors",
                                           active ? "bg-card-raised font-medium text-foreground" : "text-muted-foreground hover:bg-card hover:text-foreground",
                                       )}>
-                                    {active && <span className="absolute left-0 top-2.5 h-5 w-[3px] rounded-r-full bg-brand"/>}
-                                    <item.icon className={cn("size-[19px]", active ? "text-amber" : "text-subtle group-hover:text-muted-foreground")}
+                                    <item.icon className={cn("size-[19px]", active ? "text-foreground" : "text-subtle group-hover:text-muted-foreground")}
                                                weight={active ? "fill" : "regular"}/>
                                     {item.label}
                                 </Link>
@@ -244,14 +243,14 @@ function MobileNav() {
                         <Link key={item.href} href={item.href} aria-current={active ? "page" : undefined}
                               className={cn("flex h-16 flex-col items-center justify-center gap-1 text-[11.5px]",
                                   active ? "text-foreground" : "text-subtle")}>
-                            <item.icon className={cn("size-6", active && "text-amber")} weight={active ? "fill" : "regular"}/>
+                            <item.icon className={cn("size-6", active && "text-foreground")} weight={active ? "fill" : "regular"}/>
                             {item.href === "/ips" ? "IP" : item.href === "/metrics" ? "Статистика" : item.label}
                         </Link>
                     )
                 })}
                 <button onClick={() => setOpen(true)} aria-expanded={open}
                         className={cn("flex h-16 flex-col items-center justify-center gap-1 text-[11.5px]", moreActive ? "text-foreground" : "text-subtle")}>
-                    <SquaresFour className={cn("size-6", moreActive && "text-amber")} weight={moreActive ? "fill" : "regular"}/>
+                    <SquaresFour className={cn("size-6", moreActive && "text-foreground")} weight={moreActive ? "fill" : "regular"}/>
                     Ещё
                 </button>
             </nav>
